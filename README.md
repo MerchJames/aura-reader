@@ -1,31 +1,59 @@
 # Aura Reader
 
-A local reader for reliving SillyTavern and KoboldAI stories. Import your chat
-logs and replay them like a book — with streaming text, themes, highlights, and
-a persistent library.
+An immersive local reader for reliving **SillyTavern** and **KoboldAI** stories.
+Import your chat logs and replay them like a book — streaming text, dozens of
+themes, highlights with notes, a branch explorer, an optional AI reading
+assistant, and a persistent library. Everything is stored on your device; there
+is no server and no account.
 
 ## Features
 
-- **Library** — import multiple stories (drag & drop or file picker); progress,
-  highlights, and starred chains are saved per story in your browser
-  (IndexedDB). Settings persist across sessions.
-- **Formats** — SillyTavern chats (`.jsonl`), KoboldAI/KoboldCpp saves
-  (`.json`), and TavernAI character cards (`.png`, V1/V2/V3).
-- **Reading modes** — Storybook (prose) and Chat (bubbles), continuous scroll
-  or paginated book pages, resume where you left off.
-- **Streaming playback** — text reveals letter-by-letter or word-by-word (with
-  a WPM readout) with typewriter, smooth, magic, or fade animations, a
-  configurable pause between messages, and optional read-aloud TTS (voice and
-  rate selectable). Quoted dialogue is styled and animated separately from
-  narration.
-- **Themes** — Light, Dark, Sepia, Notebook, Terminal, Classic Book, Phone
-  Chat, College Essay, Hacker, or fully custom colors.
+- **Library** — import multiple stories (drag & drop or file picker). Progress,
+  highlights, notes, and starred chains are saved per story in your browser
+  (IndexedDB); settings persist across sessions.
+- **Formats** — SillyTavern chats (`.jsonl`, including hidden/narrator lines),
+  KoboldAI/KoboldCpp saves (`.json`), and TavernAI character cards (`.png`,
+  V1/V2/V3).
+- **Reading modes** — Storybook (prose) and Chat (bubbles), continuous scroll or
+  paginated book pages, resume where you left off.
+- **Streaming playback** — text reveals letter-by-letter or word-by-word (with a
+  WPM readout) using typewriter, smooth, magic, or fade animations, a
+  configurable pause between messages, and optional read-aloud **TTS** (voice,
+  rate, and pitch selectable; rate can follow the reading speed).
+- **Autofocus mode** — hands-free reading that auto-zooms and keeps the
+  streaming line centered, dimming everything else.
+- **Images** — inline and attached images render in both views, with a
+  click-to-zoom lightbox.
+- **Dialogue styling** — quoted speech is detected and styled apart from
+  narration, with colour options and one-shot reveal effects (zoom, pulse, wave,
+  glow, rise).
+- **Highlights & notes** — select text (or hold `F`) to highlight in five
+  colours and attach a note; highlights are painted back onto the text and
+  collected in a dedicated view you can export.
+- **Branches / What-Ifs** — browse SillyTavern swipes and Kobold alternates as
+  selectable alternate takes, and read on from any of them.
+- **AI reading assistant** (optional) — connect any **OpenAI-compatible**
+  endpoint (OpenAI, OpenRouter, LM Studio, Ollama, KoboldCpp…). It reads the
+  story with a selectable context scope (this page / up to here / whole story),
+  can fold in your highlights and notes, focus on a character, and summarize,
+  recap, synthesize, impersonate your persona, or discuss — with Markdown and
+  LaTeX rendering.
+- **Themes** — 26 of them, from Light/Dark/Sepia to Terminal (CRT), Windows 98,
+  Aero Glass, Fantasy Scroll, Synthwave, Grimoire, Cyberpunk, E-Ink, Game Boy,
+  Starlight, Manga, and more — each with fitting fonts and optional ambient
+  effects (scanlines, embers, petals, starfields…). Ambient effects can be
+  toggled off in Settings, and they respect `prefers-reduced-motion`.
+- **Customisation** — accent colours, an expanded font set, adjustable font size
+  and content width, `[OOC: …]` handling (show / dim / hide), profile pictures
+  for the character and your persona, and a Phone-Chat "dialogue only" texting
+  mode (hover a bubble to reveal the narration around it).
 - **Auto-formatter** — regex find/replace rules with flags, per-role targeting
   (AI/user), ordering, live preview, JSON import/export, and one-click presets
-  (strip `<think>` blocks, OOC comments, HTML tags, smart typography, and
-  more), plus granular toggles for paragraph spacing and dialogue layout.
+  (strip `<think>` blocks and OOC comments, HTML tags, smart typography,
+  anti-slop cliché/phrase cleanup, and more), plus toggles for paragraph
+  spacing, stray-bullet prevention, and dialogue layout.
 - **Tools** — search, chain reordering, per-chain star settings,
-  `{{user}}`/`{{char}}` substitution, highlight capture, and Markdown export.
+  `{{user}}`/`{{char}}` substitution, and Markdown export.
 
 ## Keyboard shortcuts
 
@@ -36,11 +64,12 @@ a persistent library.
 | `Q` / `E` tap | Slower / faster |
 | `E` hold | 3× speed while held |
 | `Q` hold | Rewind while held |
-| `W`/`S`, `A`/`D` | Zoom / pan (autofocus mode) |
-| `F` hold + select | Save a highlight (autofocus mode) |
+| `W` / `S`, `A` / `D` | Zoom / pan (autofocus mode) |
+| `F` hold + select | Highlight the selected text |
+| `Ctrl`/`Cmd` + `F` | Focus search |
 | `Esc` | Close settings / exit autofocus |
 
-## Getting started
+## Getting started (development)
 
 ```bash
 npm install
@@ -49,11 +78,25 @@ npm run dev
 
 Open the URL shown in the terminal (usually `http://localhost:3000`).
 
-## Building for production
+## Building
+
+**Web (static site):**
 
 ```bash
 npm run build
 ```
 
 Static files are emitted to `dist/` — serve with any static file server
-(`npx serve dist`).
+(`npx serve dist`) or host them anywhere.
+
+**Desktop app (installer):** Aura Reader also ships as a native desktop app via
+Tauri v2 — see [`BUILD.md`](./BUILD.md) for prerequisites and the
+`npm run app:build` steps that produce a Windows `.msi`/`.exe`, macOS `.dmg`, or
+Linux `.AppImage`.
+
+## Tech
+
+Vite 6 · React 19 · TypeScript · Zustand · Tailwind CSS v4 · react-markdown +
+KaTeX · Tauri 2. Stories live in IndexedDB; settings in localStorage. The AI
+assistant talks to whatever OpenAI-compatible endpoint you configure and nothing
+else leaves your machine.
