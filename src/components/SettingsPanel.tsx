@@ -1,14 +1,89 @@
-import React, { useState } from 'react';
+import React, { useMemo, useRef, useState } from 'react';
 import {
-  AlignLeft, Download, FileText, Focus, LayoutTemplate, MessageSquareQuote,
-  PauseCircle, PlayCircle, Quote, Save, Sparkles, Terminal, Trash2, Type, UserRound,
-  Volume2, X,
+  AlignLeft, Download, FileText, Focus, ImageIcon, LayoutTemplate, Loader2, MessageSquareQuote,
+  Music2, PauseCircle, Play, PlayCircle, Quote, RefreshCw, Save, Sparkles, Terminal, Trash2, Type,
+  UserRound, Volume2, X, ZoomIn,
 } from 'lucide-react';
 import { useAppStore } from '../store';
+import { useAuraV2Store } from '../stores/useAuraV2Store';
 import { ttsSupported, useVoices } from '../hooks/useTTS';
-import { THEMES } from '../themes';
-import { downloadText, safeFilename, storyToMarkdown } from '../utils/exporter';
+import { KNOWN_KOKORO_VOICES, kokoroSpeak, listKokoroVoices } from '../utils/kokoro';
+import { AMBIENT_SOUNDS } from '../utils/ambient';
+import { ACCENTS, THEMES } from '../themes';
+import {
+  downloadBlob, downloadText, exportStoryWithEdits, safeFilename, storyToMarkdown,
+} from '../utils/exporter';
 import { cn } from '../utils/cn';
+
+const readImageFile = (file: File): Promise<string> =>
+  new Promise((resolve, reject) => {
+    const r = new FileReader();
+    r.onload = () => resolve(r.result as string);
+    r.onerror = () => reject(r.error);
+    r.readAsDataURL(file);
+  });
+
+/** Upload / preview / clear one profile picture. */
+const AvatarUpload = ({
+  label, value, onPick,
+}: {
+  label: string;
+  value?: string;
+  onPick: (dataUrl: string | undefined) => void;
+}) => {
+  const inputRef = React.useRef<HTMLInputElement>(null);
+  return (
+    <div className="flex items-center gap-3 text-sm">
+      <button
+        onClick={() => inputRef.current?.click()}
+        className="w-10 h-10 rounded-full overflow-hidden ring-2 ring-app-border bg-app-text/10 flex items-center justify-center shrink-0 hover:ring-accent transition"
+        title={`Set ${label} picture`}
+      >
+        {value
+          ? <img src={value} alt={label} className="w-full h-full object-cover" />
+          : <UserRound size={16} className="opacity-60" />}
+      </button>
+      <span className="flex-1">{label}</span>
+      {value && (
+        <button onClick={() => onPick(undefined)} className="text-xs text-muted hover:text-red-500">
+          Remove
+        </button>
+      )}
+      <input
+        ref={inputRef}
+        type="file"
+        accept="image/*"
+        className="hidden"
+        onChange={async (e) => {
+          const f = e.target.files?.[0];
+          if (f) onPick(await readImageFile(f));
+          e.target.value = '';
+        }}
+      />
+    </div>
+  );
+};
+
+const ExportWithEditsButton = ({ story }: { story: import('../types').Story }) => {
+  const overridesByStory = useAuraV2Store(s => s.overridesByStory);
+  const overrides = overridesByStory[story.id];
+  if (!overrides || overrides.length === 0) return null;
+
+  const ext = story.format === 'sillytavern' ? 'jsonl' : story.format === 'kobold' ? 'json' : 'json';
+  return (
+    <button
+      onClick={() => {
+        const text = exportStoryWithEdits(story, overrides);
+        const blob = new Blob([text], { type: 'application/json;charset=utf-8' });
+        downloadBlob(`${safeFilename(story.title)}-edited.${ext}`, blob);
+      }}
+      className="flex items-center gap-2 p-2 rounded-lg hover:bg-app-text/5 transition-colors text-sm"
+    >
+      <Download size={16} />
+      <span>Export with edits applied ({overrides.length})</span>
+    </button>
+  );
+};
 
 const Section = ({ title, children }: { title: string; children: React.ReactNode }) => (
   <div>
@@ -72,6 +147,213 @@ const SelectRow = ({
   </div>
 );
 
+let previewAudio: HTMLAudioElement | null = null;
+const previewVoice = async (base: string, key: string, voice: string, onErr: (m: string) => void) => {
+  try {
+    const blob = await kokoroSpeak(base, key, voice, 'The lantern swung once, twice — then went dark.', 1);
+    previewAudio?.pause();
+    previewAudio = new Audio(URL.createObjectURL(blob));
+    void previewAudio.play();
+  } catch (e: any) {
+    onErr(e?.message ?? 'Preview failed — check the Kokoro server URL.');
+  }
+};
+
+/** Kokoro engine: server connection, default/user voices, and a per-character
+ *  voice map so each speaker reads in their own voice. */
+const KokoroSettings = () => {
+  const store = useAppStore();
+  const [voices, setVoices] = useState<string[]>(KNOWN_KOKORO_VOICES);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState('');
+  const [loaded, setLoaded] = useState(false);
+
+  const characters = useMemo(() => {
+    const names = new Set<string>();
+    (store.currentStory?.messages ?? []).forEach(m => { if (m.role === 'ai' && m.name) names.add(m.name); });
+    return [...names].slice(0, 40);
+  }, [store.currentStory]);
+
+  const load = async () => {
+    setLoading(true); setError('');
+    try {
+      const v = await listKokoroVoices(store.kokoroBaseUrl, store.kokoroApiKey);
+      setVoices(v); setLoaded(true);
+    } catch (e: any) {
+      setError(e?.message ?? 'Could not reach the Kokoro server.');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const voiceOptions = (withDefault?: string) => [
+    ...(withDefault ? [{ value: '', label: withDefault }] : []),
+    ...voices.map(v => ({ value: v, label: v })),
+  ];
+
+  const VoiceRow = ({ label, value, onChange, defaultLabel }: {
+    label: string; value: string; onChange: (v: string) => void; defaultLabel?: string;
+  }) => (
+    <div className="flex gap-2 items-center text-sm">
+      <span className="w-24 shrink-0 truncate" title={label}>{label}</span>
+      <select
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
+        className="flex-1 bg-app-text/5 border border-app-border rounded-md px-2 py-1.5 outline-none min-w-0"
+      >
+        {voiceOptions(defaultLabel).map(o => (
+          <option key={o.value || 'default'} value={o.value} className="text-black bg-white">{o.label}</option>
+        ))}
+      </select>
+      <button
+        onClick={() => previewVoice(store.kokoroBaseUrl, store.kokoroApiKey, value || store.kokoroVoice, setError)}
+        title="Preview this voice"
+        className="p-1.5 rounded-md hover:bg-app-text/10 shrink-0"
+      >
+        <Play size={13} />
+      </button>
+    </div>
+  );
+
+  return (
+    <div className="ml-1 pl-3 border-l border-app-border flex flex-col gap-2">
+      <label className="block">
+        <span className="text-xs font-bold uppercase tracking-wider text-muted">Kokoro server URL</span>
+        <input
+          type="text"
+          value={store.kokoroBaseUrl}
+          onChange={(e) => store.setKokoroBaseUrl(e.target.value)}
+          placeholder="http://localhost:8880"
+          className="mt-1 w-full bg-app-text/5 border border-app-border rounded-md px-2 py-1.5 text-sm outline-none focus:border-accent/50"
+        />
+      </label>
+      <label className="block">
+        <span className="text-xs font-bold uppercase tracking-wider text-muted">API key (optional)</span>
+        <input
+          type="password"
+          value={store.kokoroApiKey}
+          onChange={(e) => store.setKokoroApiKey(e.target.value)}
+          placeholder="leave blank for local"
+          className="mt-1 w-full bg-app-text/5 border border-app-border rounded-md px-2 py-1.5 text-sm outline-none focus:border-accent/50"
+        />
+      </label>
+      <button
+        onClick={load}
+        disabled={loading}
+        className="flex items-center justify-center gap-1.5 py-1.5 rounded-md bg-accent text-white text-sm font-medium disabled:opacity-50"
+      >
+        {loading ? <Loader2 size={14} className="animate-spin" /> : <RefreshCw size={14} />}
+        {loaded ? 'Refresh voices' : 'Connect & load voices'}
+      </button>
+      {error && <p className="text-red-500 text-xs">{error}</p>}
+
+      <VoiceRow label="Narrator" value={store.kokoroVoice} onChange={store.setKokoroVoice} />
+      <VoiceRow label="You (user)" value={store.kokoroUserVoice} onChange={store.setKokoroUserVoice} />
+
+      <div className="mt-1">
+        <span className="text-xs font-bold uppercase tracking-wider text-muted">Character voices</span>
+        {characters.length === 0 ? (
+          <p className="text-[11px] text-muted leading-snug mt-1">
+            Open a story to assign a voice to each character. Unassigned speakers use the narrator voice.
+          </p>
+        ) : (
+          <div className="flex flex-col gap-2 mt-1.5">
+            {characters.map(name => (
+              <VoiceRow
+                key={name}
+                label={name}
+                value={store.ttsVoiceByCharacter[name] ?? ''}
+                onChange={(v) => store.setCharacterVoice(name, v)}
+                defaultLabel="Narrator voice"
+              />
+            ))}
+          </div>
+        )}
+      </div>
+      <p className="text-[11px] text-muted leading-snug">
+        Run <a href="https://github.com/remsky/Kokoro-FastAPI" className="text-accent underline">Kokoro-FastAPI</a> locally
+        (default <code>:8880</code>). Voices are sent per speaker as the reader streams.
+      </p>
+    </div>
+  );
+};
+
+/** Ambient bed for the current theme: a built-in soundscape or a custom URL. */
+const AmbientSettings = () => {
+  const store = useAppStore();
+  const fileRef = useRef<HTMLInputElement>(null);
+  const theme = store.theme;
+  const themeLabel = THEMES[theme]?.label ?? theme;
+  const spec = store.ambientByTheme[theme] ?? '';
+  const builtin = spec.startsWith('builtin:') ? spec.slice(8) : '';
+  const selectValue = builtin ? builtin : spec ? 'custom' : 'none';
+
+  const onSelect = (v: string) => {
+    if (v === 'none') store.setThemeAmbient(theme, '');
+    else if (v === 'custom') store.setThemeAmbient(theme, spec && !builtin ? spec : '');
+    else store.setThemeAmbient(theme, `builtin:${v}`);
+  };
+
+  return (
+    <div className="ml-1 pl-3 border-l border-app-border flex flex-col gap-2">
+      <div className="flex gap-2 items-center text-sm">
+        <span className="w-24 shrink-0">Volume</span>
+        <input
+          type="range" min="0" max="1" step="0.05"
+          value={store.ambientVolume}
+          onChange={(e) => store.setAmbientVolume(Number(e.target.value))}
+          className="flex-1 accent-[var(--app-accent)]"
+        />
+        <span className="font-mono w-8 text-right">{Math.round(store.ambientVolume * 100)}</span>
+      </div>
+      <div className="flex gap-2 items-center text-sm">
+        <span className="w-24 shrink-0 truncate" title={themeLabel}>{themeLabel}</span>
+        <select
+          value={selectValue}
+          onChange={(e) => onSelect(e.target.value)}
+          className="flex-1 bg-app-text/5 border border-app-border rounded-md px-2 py-1.5 outline-none min-w-0"
+        >
+          <option value="none" className="text-black bg-white">None (silent)</option>
+          {AMBIENT_SOUNDS.map(s => (
+            <option key={s.id} value={s.id} className="text-black bg-white">{s.label}</option>
+          ))}
+          <option value="custom" className="text-black bg-white">Custom URL / file…</option>
+        </select>
+      </div>
+      {selectValue === 'custom' && (
+        <div className="flex gap-2 items-center">
+          <input
+            type="text"
+            value={builtin ? '' : spec}
+            onChange={(e) => store.setThemeAmbient(theme, e.target.value)}
+            placeholder="https://…/ambience.mp3"
+            className="flex-1 min-w-0 bg-app-text/5 border border-app-border rounded-md px-2 py-1.5 text-sm outline-none focus:border-accent/50"
+          />
+          <input
+            type="file" accept="audio/*" ref={fileRef} className="hidden"
+            onChange={(e) => {
+              const f = e.target.files?.[0];
+              if (f) store.setThemeAmbient(theme, URL.createObjectURL(f));
+              e.target.value = '';
+            }}
+          />
+          <button
+            onClick={() => fileRef.current?.click()}
+            title="Pick a local audio file (plays this session; a URL persists across restarts)"
+            className="p-1.5 rounded-md hover:bg-app-text/10 shrink-0 border border-app-border"
+          >
+            <FileText size={14} />
+          </button>
+        </div>
+      )}
+      <p className="text-[11px] text-muted leading-snug">
+        The bed is tied to <b>{themeLabel}</b> — switch themes to give each its own atmosphere.
+        Built-in soundscapes are synthesized (no downloads); a pasted URL persists, a picked file plays only this session.
+      </p>
+    </div>
+  );
+};
+
 export const SettingsPanel = ({ onOpenAutoFormat }: { onOpenAutoFormat: () => void }) => {
   const store = useAppStore();
   const [configName, setConfigName] = useState('');
@@ -123,6 +405,25 @@ export const SettingsPanel = ({ onOpenAutoFormat }: { onOpenAutoFormat: () => vo
                 </label>
               </div>
             )}
+            <div className="flex gap-2 items-start text-sm">
+              <span className="w-24 shrink-0 pt-1">Accent</span>
+              <div className="flex flex-wrap gap-1.5 flex-1">
+                {ACCENTS.map(a => (
+                  <button
+                    key={a.id || 'theme'}
+                    title={a.label}
+                    onClick={() => store.setAccentColor(a.id)}
+                    className={cn(
+                      'w-6 h-6 rounded-full border transition-transform hover:scale-110',
+                      store.accentColor === a.id ? 'ring-2 ring-offset-2 ring-offset-surface ring-app-text scale-110' : 'border-app-border',
+                    )}
+                    style={a.hex
+                      ? { background: a.hex }
+                      : { background: 'conic-gradient(from 0deg, #f43f5e, #f59e0b, #10b981, #0ea5e9, #8b5cf6, #f43f5e)' }}
+                  />
+                ))}
+              </div>
+            </div>
             <SelectRow
               label="Font"
               value={store.fontFamily}
@@ -131,8 +432,12 @@ export const SettingsPanel = ({ onOpenAutoFormat }: { onOpenAutoFormat: () => vo
                 { value: 'sans', label: 'Sans-serif' },
                 { value: 'serif', label: 'Serif' },
                 { value: 'mono', label: 'Monospace' },
+                { value: 'slab', label: 'Slab Serif' },
+                { value: 'rounded', label: 'Rounded' },
                 { value: 'handwriting', label: 'Handwriting' },
                 { value: 'typewriter', label: 'Typewriter' },
+                { value: 'medieval', label: 'Medieval' },
+                { value: 'comic', label: 'Comic' },
                 { value: 'dyslexic', label: 'OpenDyslexic' },
               ]}
             />
@@ -154,11 +459,37 @@ export const SettingsPanel = ({ onOpenAutoFormat }: { onOpenAutoFormat: () => vo
                 </button>
               </div>
             </div>
+            <div className="flex flex-col gap-1 bg-app-text/5 px-3 py-2 rounded-lg text-sm">
+              <div className="flex justify-between items-center">
+                <span>Content Width</span>
+                <span className="font-mono text-xs opacity-70">
+                  {store.contentWidth === 0 ? 'Default' : `${store.contentWidth}px`}
+                </span>
+              </div>
+              <input
+                type="range"
+                min={0}
+                max={1800}
+                step={40}
+                value={store.contentWidth}
+                onChange={(e) => store.setContentWidth(Number(e.target.value))}
+                className="w-full accent-accent"
+              />
+              <span className="text-[11px] text-muted">
+                Widen the reading column (best on desktop). 0 = theme default.
+              </span>
+            </div>
+            <Toggle
+              icon={<Sparkles size={16} />}
+              label="Ambient theme effects"
+              value={store.themeEffects}
+              onChange={store.setThemeEffects}
+            />
           </Section>
 
           <Section title="Reveal Animation">
-            <div className="grid grid-cols-4 gap-2">
-              {(['typewriter', 'smooth', 'magic', 'fade'] as const).map(style => (
+            <div className="grid grid-cols-3 gap-2">
+              {(['typewriter', 'smooth', 'magic', 'fade', 'blur', 'ink', 'glitch', 'rise', 'decrypt'] as const).map(style => (
                 <button
                   key={style}
                   onClick={() => store.setAnimationStyle(style)}
@@ -173,6 +504,33 @@ export const SettingsPanel = ({ onOpenAutoFormat }: { onOpenAutoFormat: () => vo
                 </button>
               ))}
             </div>
+            <span className="text-[11px] text-muted">
+              Some themes bring their own signature reveal while ambient
+              effects are on (e.g. Hacker decrypts, Grimoire inks in).
+            </span>
+            <div className="pt-2">
+              <p className="text-xs font-medium mb-1.5 opacity-80">Streaming text effect</p>
+              <div className="grid grid-cols-3 gap-2">
+                {(['none', 'fade', 'blur', 'ink', 'glitch', 'rise'] as const).map(effect => (
+                  <button
+                    key={effect}
+                    onClick={() => store.setStreamEffect(effect)}
+                    className={cn(
+                      'py-1.5 text-xs rounded-md border capitalize transition-colors',
+                      store.streamEffect === effect
+                        ? 'border-accent bg-accent/10 text-accent font-bold'
+                        : 'border-transparent bg-app-text/5 hover:bg-app-text/10',
+                    )}
+                  >
+                    {effect === 'none' ? 'Off' : effect}
+                  </button>
+                ))}
+              </div>
+              <span className="text-[11px] text-muted">
+                Animates each word as it streams in — on top of (and independent
+                from) the block reveal above.
+              </span>
+            </div>
           </Section>
 
           <Section title="Reading">
@@ -183,6 +541,29 @@ export const SettingsPanel = ({ onOpenAutoFormat }: { onOpenAutoFormat: () => vo
               onChange={store.setIsAutofocusMode}
               accent
             />
+            {store.isAutofocusMode && (
+              <div className="ml-4 pl-3 border-l border-app-border flex flex-col gap-1">
+                <Toggle
+                  icon={<ZoomIn size={15} />}
+                  label="Auto-zoom on streaming text"
+                  value={store.autofocusAutoZoom}
+                  onChange={(v) => {
+                    store.setAutofocusAutoZoom(v);
+                    store.setAutofocusZoom(v ? 1.4 : 1);
+                  }}
+                />
+                <div className="flex gap-2 items-center text-sm px-2 py-1">
+                  <span className="w-20 shrink-0">Zoom</span>
+                  <input
+                    type="range" min="0.8" max="2.5" step="0.1"
+                    value={store.autofocusZoom}
+                    onChange={(e) => store.setAutofocusZoom(Number(e.target.value))}
+                    className="flex-1 accent-[var(--app-accent)]"
+                  />
+                  <span className="font-mono w-10 text-right">{store.autofocusZoom.toFixed(1)}×</span>
+                </div>
+              </div>
+            )}
             <Toggle
               icon={<PlayCircle size={16} />}
               label="Auto-Stream"
@@ -236,15 +617,24 @@ export const SettingsPanel = ({ onOpenAutoFormat }: { onOpenAutoFormat: () => vo
                 { value: '2000', label: 'Long (2s)' },
               ]}
             />
-            {ttsSupported() && (
+            <Toggle
+              icon={<Volume2 size={16} />}
+              label="Read Aloud (TTS)"
+              value={store.ttsEnabled}
+              onChange={store.setTtsEnabled}
+            />
+            {store.ttsEnabled && (
               <>
-                <Toggle
-                  icon={<Volume2 size={16} />}
-                  label="Read Aloud (TTS)"
-                  value={store.ttsEnabled}
-                  onChange={store.setTtsEnabled}
+                <SelectRow
+                  label="Engine"
+                  value={store.ttsEngine}
+                  onChange={(v) => store.setTtsEngine(v as 'browser' | 'kokoro')}
+                  options={[
+                    { value: 'browser', label: 'System voices (offline)' },
+                    { value: 'kokoro', label: 'Kokoro (neural, per-character)' },
+                  ]}
                 />
-                {store.ttsEnabled && (
+                {store.ttsEngine === 'browser' && ttsSupported() && (
                   <>
                     <SelectRow
                       label="Voice"
@@ -252,26 +642,67 @@ export const SettingsPanel = ({ onOpenAutoFormat }: { onOpenAutoFormat: () => vo
                       onChange={store.setTtsVoiceURI}
                       options={[
                         { value: '', label: 'System default' },
-                        ...voices.map(v => ({
-                          value: v.voiceURI,
-                          label: `${v.name} (${v.lang})`,
-                        })),
+                        ...[...voices]
+                          .sort((a, b) => {
+                            const rank = (v: SpeechSynthesisVoice) =>
+                              /natural|online|neural/i.test(v.name) ? 0 : v.localService ? 1 : 2;
+                            return rank(a) - rank(b) || a.name.localeCompare(b.name);
+                          })
+                          .map(v => ({
+                            value: v.voiceURI,
+                            label: `${/natural|online|neural/i.test(v.name) ? '★ ' : ''}${v.name} (${v.lang})`,
+                          })),
                       ]}
                     />
-                    <div className="flex gap-2 items-center text-sm">
-                      <span className="w-24 shrink-0">Voice rate</span>
-                      <input
-                        type="range" min="0.5" max="2" step="0.1"
-                        value={store.ttsRate}
-                        onChange={(e) => store.setTtsRate(Number(e.target.value))}
-                        className="flex-1 accent-[var(--app-accent)]"
-                      />
-                      <span className="font-mono w-8 text-right">{store.ttsRate.toFixed(1)}×</span>
-                    </div>
+                    <p className="text-[11px] text-muted leading-snug px-1">
+                      ★ marks higher-quality "natural / online" voices. More voices come from your
+                      OS — on Windows, add them in Settings → Time &amp; Language → Speech.
+                    </p>
                   </>
+                )}
+                {store.ttsEngine === 'browser' && !ttsSupported() && (
+                  <p className="text-[11px] text-amber-500 leading-snug px-1">
+                    This browser has no built-in speech voices — switch the engine to Kokoro.
+                  </p>
+                )}
+                {store.ttsEngine === 'kokoro' && <KokoroSettings />}
+                <Toggle
+                  icon={<Volume2 size={15} />}
+                  label="Match reading speed"
+                  value={store.ttsFollowSpeed}
+                  onChange={store.setTtsFollowSpeed}
+                />
+                <div className="flex gap-2 items-center text-sm">
+                  <span className="w-24 shrink-0">Base rate</span>
+                  <input
+                    type="range" min="0.5" max="2" step="0.1"
+                    value={store.ttsRate}
+                    onChange={(e) => store.setTtsRate(Number(e.target.value))}
+                    className="flex-1 accent-[var(--app-accent)]"
+                  />
+                  <span className="font-mono w-8 text-right">{store.ttsRate.toFixed(1)}×</span>
+                </div>
+                {store.ttsEngine === 'browser' && (
+                  <div className="flex gap-2 items-center text-sm">
+                    <span className="w-24 shrink-0">Pitch</span>
+                    <input
+                      type="range" min="0" max="2" step="0.1"
+                      value={store.ttsPitch}
+                      onChange={(e) => store.setTtsPitch(Number(e.target.value))}
+                      className="flex-1 accent-[var(--app-accent)]"
+                    />
+                    <span className="font-mono w-8 text-right">{store.ttsPitch.toFixed(1)}</span>
+                  </div>
                 )}
               </>
             )}
+            <Toggle
+              icon={<Music2 size={16} />}
+              label="Ambient sound"
+              value={store.ambientEnabled}
+              onChange={store.setAmbientEnabled}
+            />
+            {store.ambientEnabled && <AmbientSettings />}
           </Section>
 
           <Section title="Text Processing">
@@ -316,10 +747,26 @@ export const SettingsPanel = ({ onOpenAutoFormat }: { onOpenAutoFormat: () => vo
               onChange={store.setSubstituteNames}
             />
             <Toggle
+              icon={<ImageIcon size={16} />}
+              label="Show Images"
+              value={store.showImages}
+              onChange={store.setShowImages}
+            />
+            <Toggle
               icon={<FileText size={16} />}
               label="Hide Metadata Tags"
               value={store.hideMetadata}
               onChange={store.setHideMetadata}
+            />
+            <SelectRow
+              label="OOC asides"
+              value={store.oocHandling}
+              onChange={(v) => store.setOocHandling(v as any)}
+              options={[
+                { value: 'show', label: 'Show normally' },
+                { value: 'dim', label: 'Dim (muted italic)' },
+                { value: 'hide', label: 'Hide entirely' },
+              ]}
             />
             <button
               onClick={() => { close(); onOpenAutoFormat(); }}
@@ -327,7 +774,12 @@ export const SettingsPanel = ({ onOpenAutoFormat }: { onOpenAutoFormat: () => vo
             >
               <div className="flex items-center gap-2">
                 <Terminal size={16} />
-                <span>Custom Regex Rules</span>
+                <div className="text-left">
+                  <span className="block">Formatting Studio</span>
+                  <span className="block text-[10px] opacity-70 font-normal">
+                    Force-format stats ([Health] 100 → panels) · regex rules · AI reformat
+                  </span>
+                </div>
               </div>
               <span>&rarr;</span>
             </button>
@@ -354,6 +806,8 @@ export const SettingsPanel = ({ onOpenAutoFormat }: { onOpenAutoFormat: () => vo
                 { value: 'zoom', label: 'Zoom' },
                 { value: 'pulse', label: 'Pulse' },
                 { value: 'wave', label: 'Wave' },
+                { value: 'glow', label: 'Glow' },
+                { value: 'rise', label: 'Rise' },
               ]}
             />
             <SelectRow
@@ -370,6 +824,61 @@ export const SettingsPanel = ({ onOpenAutoFormat }: { onOpenAutoFormat: () => vo
               ]}
             />
           </Section>
+
+          {store.currentStory && (
+            <Section title="Profile Pictures">
+              <AvatarUpload
+                label={store.currentStory.userName || 'You'}
+                value={store.currentStory.userAvatar}
+                onPick={(url) => store.setStoryAvatar('user', url)}
+              />
+              <AvatarUpload
+                label="Default character picture"
+                value={store.currentStory.characterAvatar ?? store.currentStory.avatar}
+                onPick={(url) => store.setStoryAvatar('character', url)}
+              />
+              {(() => {
+                const names = Array.from(new Set(
+                  store.currentStory.messages
+                    .filter(m => m.role !== 'user')
+                    .map(m => m.name),
+                ));
+                if (names.length <= 1) return null;
+                const fallback = store.currentStory.characterAvatar ?? store.currentStory.avatar;
+                return (
+                  <>
+                    <div className="h-px bg-app-border/60 my-1" />
+                    <span className="text-[11px] text-muted">Per-character overrides</span>
+                    {names.map(name => (
+                      <AvatarUpload
+                        key={name}
+                        label={name}
+                        value={store.currentStory!.characterAvatars?.[name] ?? fallback}
+                        onPick={(url) => store.setCharacterAvatar(name, url)}
+                      />
+                    ))}
+                  </>
+                );
+              })()}
+              <span className="text-[11px] text-muted">
+                Shown beside messages in Chat &amp; Phone views. Saved with this story.
+              </span>
+            </Section>
+          )}
+
+          {store.theme === 'phone' && (
+            <Section title="Phone View">
+              <Toggle
+                icon={<MessageSquareQuote size={16} />}
+                label="Dialogue only (texting feel)"
+                value={store.phoneDialogueOnly}
+                onChange={store.setPhoneDialogueOnly}
+              />
+              <span className="text-[11px] text-muted">
+                Hides narration and shows each spoken line as its own message bubble.
+              </span>
+            </Section>
+          )}
 
           <Section title="Saved Configurations">
             <div className="flex gap-2">
@@ -423,6 +932,7 @@ export const SettingsPanel = ({ onOpenAutoFormat }: { onOpenAutoFormat: () => vo
                 <Download size={16} />
                 <span>Export story as Markdown</span>
               </button>
+              <ExportWithEditsButton story={store.currentStory} />
             </Section>
           )}
 

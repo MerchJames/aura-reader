@@ -13,7 +13,12 @@ export const PlaybackControls = () => {
     [store.chains],
   );
 
-  if (store.chains.length === 0 || store.viewMode === 'overview' || store.viewMode === 'highlights') {
+  if (
+    store.chains.length === 0 ||
+    store.viewMode === 'overview' ||
+    store.viewMode === 'highlights' ||
+    store.viewMode === 'branches'
+  ) {
     return null;
   }
 

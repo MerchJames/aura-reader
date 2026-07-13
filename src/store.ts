@@ -3,7 +3,7 @@ import { persist } from 'zustand/middleware';
 import {
   AppConfig, AppState, Chain, ChainStarSettings, Message, Story, StoryFormat,
 } from './types';
-import { parseFile } from './utils/parser';
+import { ParsedCard, parseCompanionCard, parseFile } from './utils/parser';
 import { deleteStory, getAllStoryMetas, getStory, putStory } from './lib/storage';
 
 /* ------------------------------------------------------------------ */
@@ -98,11 +98,16 @@ const newId = () =>
     : `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
 
 const CONFIG_KEYS: (keyof AppConfig)[] = [
-  'theme', 'fontFamily', 'fontSize', 'textColor', 'bgColor', 'animationStyle',
-  'hideMetadata', 'playbackSpeed', 'autoStream', 'autoFormat', 'autoFormatRules',
+  'theme', 'accentColor', 'fontFamily', 'fontSize', 'textColor', 'bgColor', 'animationStyle', 'streamEffect',
+  'hideMetadata', 'showImages', 'autofocusAutoZoom',
+  'playbackSpeed', 'autoStream', 'autoFormat', 'autoFormatRules', 'statRules',
   'paragraphSpacing', 'dialogueOwnLine', 'smartTypography',
   'styleQuotes', 'substituteNames', 'dialogueColor', 'dialogueStyle', 'dialogueAnimation',
+  'contentWidth', 'oocHandling', 'phoneDialogueOnly', 'themeEffects',
   'revealMode', 'messagePause', 'pauseAtPageEnd', 'ttsEnabled', 'ttsVoiceURI', 'ttsRate',
+  'ttsPitch', 'ttsFollowSpeed', 'aiBaseUrl', 'aiApiKey', 'aiModel',
+  'ttsEngine', 'kokoroBaseUrl', 'kokoroApiKey', 'kokoroVoice', 'kokoroUserVoice', 'ttsVoiceByCharacter',
+  'ambientEnabled', 'ambientVolume', 'ambientByTheme',
 ];
 
 const pickConfig = (state: AppState): AppConfig => {
@@ -167,16 +172,21 @@ export const useAppStore = create<AppState>()(
       return {
         /* ----- config defaults ----- */
         theme: 'dark',
+        accentColor: '',
         fontFamily: 'sans',
         fontSize: 16,
         textColor: '#ffffff',
         bgColor: '#111827',
         animationStyle: 'typewriter',
+        streamEffect: 'none',
         hideMetadata: true,
+        showImages: true,
+        autofocusAutoZoom: true,
         playbackSpeed: 50,
         autoStream: true,
         autoFormat: true,
         autoFormatRules: [],
+        statRules: [],
         paragraphSpacing: true,
         dialogueOwnLine: false,
         smartTypography: false,
@@ -188,9 +198,27 @@ export const useAppStore = create<AppState>()(
         ttsEnabled: false,
         ttsVoiceURI: '',
         ttsRate: 1,
+        ttsPitch: 1,
+        ttsFollowSpeed: true,
+        ttsEngine: 'browser',
+        kokoroBaseUrl: 'http://localhost:8880',
+        kokoroApiKey: '',
+        kokoroVoice: 'af_bella',
+        kokoroUserVoice: 'am_michael',
+        ttsVoiceByCharacter: {},
+        ambientEnabled: false,
+        ambientVolume: 0.35,
+        ambientByTheme: {},
         dialogueColor: 'text-indigo-600 dark:text-indigo-300',
         dialogueStyle: 'normal',
         dialogueAnimation: 'zoom',
+        contentWidth: 0,
+        oocHandling: 'show',
+        phoneDialogueOnly: false,
+        themeEffects: true,
+        aiBaseUrl: '',
+        aiApiKey: '',
+        aiModel: '',
 
         /* ----- library ----- */
         screen: 'library',
@@ -221,6 +249,8 @@ export const useAppStore = create<AppState>()(
         savedConfigs: {},
         ttsPending: false,
         awaitingAdvance: false,
+        swipeSelections: {},
+        aiOpen: false,
 
         /* ----- library actions ----- */
 
@@ -234,9 +264,31 @@ export const useAppStore = create<AppState>()(
           }
         },
 
-        importFiles: async (files: File[]) => {
+        importFiles: async (files: File[], cardFiles: File[] = []) => {
           const errors: string[] = [];
           const imported: Story[] = [];
+
+          // Companion character cards, matched to stories after parsing.
+          const companions: ParsedCard[] = [];
+          for (const cf of cardFiles) {
+            try {
+              companions.push(await parseCompanionCard(cf));
+            } catch (e: any) {
+              errors.push(e?.message ?? `${cf.name}: failed to read card`);
+            }
+          }
+          const matchCompanion = (story: {
+            characterName?: string; title: string;
+          }): ParsedCard | undefined => {
+            // A single card with a single story always pairs up; otherwise
+            // match the card's name against the story's character / title.
+            if (companions.length === 1 && files.length === 1) return companions[0];
+            const norm = (s?: string) => (s ?? '').trim().toLowerCase();
+            return companions.find(c =>
+              norm(c.name) &&
+              (norm(c.name) === norm(story.characterName) ||
+               norm(story.title).includes(norm(c.name))));
+          };
 
           for (const file of files) {
             try {
@@ -245,19 +297,23 @@ export const useAppStore = create<AppState>()(
                 errors.push(`${file.name}: no messages found`);
                 continue;
               }
+              const companion = matchCompanion(parsed);
               const story: Story = {
                 id: newId(),
                 title: parsed.title,
                 format: parsed.format,
-                characterName: parsed.characterName,
+                characterName: parsed.characterName ?? companion?.info.name,
                 userName: parsed.userName,
-                avatar: parsed.avatar,
+                avatar: parsed.avatar ?? companion?.avatar,
+                characterAvatar: companion?.avatar,
                 messages: parsed.messages,
                 messageCount: parsed.messages.length,
                 importedAt: Date.now(),
                 progress: null,
                 highlights: [],
                 stars: {},
+                card: parsed.card ?? companion?.info,
+                tags: (parsed.card ?? companion?.info)?.tags,
               };
               await putStory(story);
               imported.push(story);
@@ -267,7 +323,7 @@ export const useAppStore = create<AppState>()(
           }
 
           if (imported.length > 0) {
-            const metas = imported.map(({ messages: _m, highlights: _h, stars: _s, ...meta }) => meta);
+            const metas = imported.map(({ messages: _m, highlights: _h, stars: _s, card: _c, ...meta }) => meta);
             set({ library: [...metas, ...get().library] });
           }
           if (imported.length === 1 && files.length === 1) {
@@ -644,11 +700,15 @@ export const useAppStore = create<AppState>()(
         },
 
         setTheme: (theme) => set({ theme }),
+        setAccentColor: (accentColor) => set({ accentColor }),
+        setShowImages: (showImages) => set({ showImages }),
+        setAutofocusAutoZoom: (autofocusAutoZoom) => set({ autofocusAutoZoom }),
         setFontFamily: (fontFamily) => set({ fontFamily }),
         setFontSize: (fontSize) => set({ fontSize }),
         setTextColor: (textColor) => set({ textColor, theme: 'custom' }),
         setBgColor: (bgColor) => set({ bgColor, theme: 'custom' }),
         setAnimationStyle: (animationStyle) => set({ animationStyle }),
+        setStreamEffect: (streamEffect) => set({ streamEffect }),
         setHideMetadata: (hideMetadata) => set({ hideMetadata }),
         setAutoStream: (autoStream) => set({ autoStream }),
         setAutoFormat: (autoFormat) => set({ autoFormat }),
@@ -663,11 +723,37 @@ export const useAppStore = create<AppState>()(
         setTtsEnabled: (ttsEnabled) => set({ ttsEnabled }),
         setTtsVoiceURI: (ttsVoiceURI) => set({ ttsVoiceURI }),
         setTtsRate: (ttsRate) => set({ ttsRate }),
+        setTtsPitch: (ttsPitch) => set({ ttsPitch }),
+        setTtsFollowSpeed: (ttsFollowSpeed) => set({ ttsFollowSpeed }),
         setTtsPending: (ttsPending) => set({ ttsPending }),
+        setTtsEngine: (ttsEngine) => set({ ttsEngine }),
+        setKokoroBaseUrl: (kokoroBaseUrl) => set({ kokoroBaseUrl }),
+        setKokoroApiKey: (kokoroApiKey) => set({ kokoroApiKey }),
+        setKokoroVoice: (kokoroVoice) => set({ kokoroVoice }),
+        setKokoroUserVoice: (kokoroUserVoice) => set({ kokoroUserVoice }),
+        setCharacterVoice: (name, voice) => {
+          const next = { ...get().ttsVoiceByCharacter };
+          if (voice) next[name] = voice;
+          else delete next[name];
+          set({ ttsVoiceByCharacter: next });
+        },
+        setAmbientEnabled: (ambientEnabled) => set({ ambientEnabled }),
+        setAmbientVolume: (ambientVolume) => set({ ambientVolume }),
+        setThemeAmbient: (theme, value) => {
+          const next = { ...get().ambientByTheme };
+          if (value) next[theme] = value;
+          else delete next[theme];
+          set({ ambientByTheme: next });
+        },
         setAwaitingAdvance: (awaitingAdvance) => set({ awaitingAdvance }),
         setSearchQuery: (searchQuery) => set({ searchQuery }),
         setIsAutofocusMode: (isAutofocusMode) =>
-          set({ isAutofocusMode, autofocusZoom: 1, autofocusPanX: 0 }),
+          set({
+            isAutofocusMode,
+            // Auto-zoom: entering focus zooms in on the streaming line.
+            autofocusZoom: isAutofocusMode && get().autofocusAutoZoom ? 1.4 : 1,
+            autofocusPanX: 0,
+          }),
         setAutofocusZoom: (autofocusZoom) => set({ autofocusZoom }),
         setAutofocusPanX: (autofocusPanX) => set({ autofocusPanX }),
         setIsHighlightMode: (isHighlightMode) => set({ isHighlightMode }),
@@ -678,6 +764,90 @@ export const useAppStore = create<AppState>()(
         setDialogueColor: (dialogueColor) => set({ dialogueColor }),
         setDialogueStyle: (dialogueStyle) => set({ dialogueStyle }),
         setDialogueAnimation: (dialogueAnimation) => set({ dialogueAnimation }),
+        setContentWidth: (contentWidth) => set({ contentWidth }),
+        setOocHandling: (oocHandling) => set({ oocHandling }),
+        setPhoneDialogueOnly: (phoneDialogueOnly) => set({ phoneDialogueOnly }),
+        setThemeEffects: (themeEffects) => set({ themeEffects }),
+
+        setStoryAvatar: (who, dataUrl) => {
+          const { currentStory } = get();
+          if (!currentStory) return;
+          const field = who === 'character' ? 'characterAvatar' : 'userAvatar';
+          set({
+            currentStory: { ...currentStory, [field]: dataUrl },
+            library: get().library.map(m =>
+              m.id === currentStory.id ? { ...m, [field]: dataUrl } : m,
+            ),
+          });
+          schedulePersist();
+        },
+
+        setCharacterAvatar: (name, dataUrl) => {
+          const { currentStory } = get();
+          if (!currentStory) return;
+          const next: Record<string, string | undefined> = {
+            ...currentStory.characterAvatars,
+            [name]: dataUrl,
+          };
+          if (!dataUrl) delete next[name];
+          const characterAvatars = Object.fromEntries(
+            Object.entries(next).filter(([, v]) => v !== undefined),
+          ) as Record<string, string>;
+          set({
+            currentStory: { ...currentStory, characterAvatars },
+            library: get().library.map(m =>
+              m.id === currentStory.id ? { ...m, characterAvatars } : m,
+            ),
+          });
+          schedulePersist();
+        },
+
+        setAiBaseUrl: (aiBaseUrl) => set({ aiBaseUrl }),
+        setAiApiKey: (aiApiKey) => set({ aiApiKey }),
+        setAiModel: (aiModel) => set({ aiModel }),
+        setAiOpen: (aiOpen) => set({ aiOpen }),
+
+        selectSwipe: (messageId, index) => {
+          const { chains } = get();
+          const findM = (cs: typeof chains, id: string) =>
+            cs.flatMap(c => c.messages).find(m => m.id === id);
+          let changed = false;
+          const newChains = chains.map(c => ({
+            ...c,
+            messages: c.messages.map(m => {
+              if (m.id === messageId && m.swipes && m.swipes[index] != null) {
+                changed = true;
+                return { ...m, content: m.swipes[index] };
+              }
+              return m;
+            }),
+          }));
+          if (!changed) return;
+          const updated = findM(newChains, messageId);
+          set({
+            chains: newChains,
+            swipeSelections: { ...get().swipeSelections, [messageId]: index },
+            visibleMessages: get().visibleMessages.map(m =>
+              m.id === messageId ? updated ?? m : m),
+            ...(get().streamingMessage?.id === messageId
+              ? { streamingMessage: updated ?? get().streamingMessage, streamedText: '' }
+              : {}),
+          });
+          schedulePersist();
+        },
+
+        updateHighlight: (id, updates) => {
+          const { currentStory } = get();
+          if (!currentStory) return;
+          set({
+            currentStory: {
+              ...currentStory,
+              highlights: (currentStory.highlights ?? []).map(h =>
+                h.id === id ? { ...h, ...updates } : h),
+            },
+          });
+          schedulePersist();
+        },
 
         addAutoFormatRule: (rule) =>
           set({ autoFormatRules: [...get().autoFormatRules, rule] }),
@@ -706,6 +876,24 @@ export const useAppStore = create<AppState>()(
           set({ autoFormatRules: [...get().autoFormatRules, ...incoming] });
         },
 
+        addStatRule: (rule) =>
+          set({ statRules: [...get().statRules, rule] }),
+        updateStatRule: (id, updates) =>
+          set({
+            statRules: get().statRules.map(r =>
+              r.id === id ? { ...r, ...updates } : r),
+          }),
+        removeStatRule: (id) =>
+          set({ statRules: get().statRules.filter(r => r.id !== id) }),
+        moveStatRule: (id, direction) => {
+          const rules = [...get().statRules];
+          const idx = rules.findIndex(r => r.id === id);
+          const target = idx + direction;
+          if (idx === -1 || target < 0 || target >= rules.length) return;
+          [rules[idx], rules[target]] = [rules[target], rules[idx]];
+          set({ statRules: rules });
+        },
+
         saveConfig: (name) =>
           set({ savedConfigs: { ...get().savedConfigs, [name]: pickConfig(get()) } }),
         loadConfig: (name) => {
@@ -724,9 +912,9 @@ export const useAppStore = create<AppState>()(
       partialize: (state) => ({
         ...pickConfig(state),
         savedConfigs: state.savedConfigs,
-        viewMode: state.viewMode === 'overview' || state.viewMode === 'highlights'
-          ? 'chat'
-          : state.viewMode,
+        viewMode: state.viewMode === 'storybook' || state.viewMode === 'chat'
+          ? state.viewMode
+          : 'chat',
         layoutMode: state.layoutMode,
         controlsMinimized: state.controlsMinimized,
       }),

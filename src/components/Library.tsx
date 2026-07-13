@@ -2,6 +2,7 @@ import React, { useRef, useState } from 'react';
 import { BookOpen, FileJson, Image, MessageSquare, Settings, Trash2, Upload, X } from 'lucide-react';
 import { useAppStore } from '../store';
 import { StoryFormat, StoryMeta } from '../types';
+import { ImportModal } from './ImportModal';
 import { cn } from '../utils/cn';
 
 const FORMAT_LABEL: Record<StoryFormat, string> = {
@@ -65,6 +66,21 @@ const StoryCard = ({ story }: { story: StoryMeta }) => {
           <div className="text-xs text-muted mt-0.5">
             Imported {new Date(story.importedAt).toLocaleDateString()}
           </div>
+          {story.tags && story.tags.length > 0 && (
+            <div className="flex flex-wrap gap-1 mt-1.5">
+              {story.tags.slice(0, 3).map(tag => (
+                <span
+                  key={tag}
+                  className="px-1.5 py-0.5 rounded-full bg-app-text/5 border border-app-border/60 text-[10px] text-muted"
+                >
+                  {tag}
+                </span>
+              ))}
+              {story.tags.length > 3 && (
+                <span className="text-[10px] text-muted">+{story.tags.length - 3}</span>
+              )}
+            </div>
+          )}
 
           <div className="mt-3">
             <div className="h-1.5 rounded-full bg-app-text/10 overflow-hidden">
@@ -106,21 +122,35 @@ export const Library = () => {
   const [dragging, setDragging] = useState(false);
   const [importing, setImporting] = useState(false);
   const [errors, setErrors] = useState<string[]>([]);
+  const [pending, setPending] = useState<{ stories: File[]; cards: File[] } | null>(null);
 
-  const handleFiles = async (files: File[]) => {
-    if (files.length === 0) return;
+  const runImport = async (stories: File[], cards: File[]) => {
     setImporting(true);
     try {
-      const result = await importFiles(files);
+      const result = await importFiles(stories, cards);
       setErrors(result.errors);
+      setPending(null);
     } finally {
       setImporting(false);
     }
   };
 
+  const handleFiles = async (files: File[]) => {
+    if (files.length === 0) return;
+    const stories = files.filter(f => /\.(jsonl?|json)$/i.test(f.name));
+    const cards = files.filter(f => /\.png$/i.test(f.name));
+    // Story files get the import modal (attach cards up front); a pure
+    // card drop keeps the classic instant flow (card becomes a story).
+    if (stories.length > 0) {
+      setPending({ stories, cards });
+    } else {
+      await runImport(files, []);
+    }
+  };
+
   return (
     <div
-      className="flex-1 flex flex-col"
+      className="flex-1 min-h-0 overflow-y-auto flex flex-col"
       onDragOver={(e) => { e.preventDefault(); setDragging(true); }}
       onDragLeave={(e) => { if (e.currentTarget === e.target) setDragging(false); }}
       onDrop={(e) => {
@@ -206,6 +236,16 @@ export const Library = () => {
           </div>
         )}
       </main>
+
+      {pending && (
+        <ImportModal
+          storyFiles={pending.stories}
+          initialCards={pending.cards}
+          importing={importing}
+          onImport={(cards) => void runImport(pending.stories, cards)}
+          onCancel={() => setPending(null)}
+        />
+      )}
 
       {dragging && library.length > 0 && (
         <div className="fixed inset-0 z-50 bg-accent/20 backdrop-blur-sm flex items-center justify-center pointer-events-none">

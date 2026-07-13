@@ -1,7 +1,12 @@
 import React from 'react';
-import { Download, LocateFixed, Trash2 } from 'lucide-react';
+import { Download, LocateFixed, StickyNote, Trash2 } from 'lucide-react';
 import { useAppStore } from '../store';
+import { HIGHLIGHT_COLORS } from '../types';
 import { downloadText, safeFilename } from '../utils/exporter';
+import { cn } from '../utils/cn';
+
+const colorBg = (key?: string) =>
+  HIGHLIGHT_COLORS.find(c => c.key === key)?.bg ?? HIGHLIGHT_COLORS[0].bg;
 
 export const HighlightsMode = () => {
   const store = useAppStore();
@@ -23,12 +28,15 @@ export const HighlightsMode = () => {
 
   const exportHighlights = () => {
     const title = store.currentStory?.title ?? 'story';
-    const md = [`# Highlights — ${title}`, '', ...highlights.map(h => `> ${h.text}\n`)].join('\n');
+    const md = [
+      `# Highlights — ${title}`, '',
+      ...highlights.map(h => `> ${h.text}\n${h.note ? `\n**Note:** ${h.note}\n` : ''}`),
+    ].join('\n');
     downloadText(`${safeFilename(title)}-highlights.md`, md);
   };
 
   return (
-    <div className="flex-1 overflow-y-auto p-8 pb-40">
+    <div className="flex-1 min-h-0 overflow-y-auto p-8 pb-40">
       <div className="max-w-4xl mx-auto space-y-6">
         <div className="flex items-center justify-between border-b border-app-border pb-4 mb-8">
           <h2 className="text-2xl font-serif font-bold">Your Highlights</h2>
@@ -71,9 +79,43 @@ export const HighlightsMode = () => {
                 </div>
               </div>
 
-              <blockquote className="text-lg font-medium italic border-l-4 border-amber-500 pl-4 py-1">
+              <blockquote
+                className="text-lg font-medium italic pl-4 py-1 rounded-sm"
+                style={{ borderLeft: '4px solid transparent', background: colorBg(highlight.color) }}
+              >
                 "{highlight.text}"
               </blockquote>
+
+              <div className="mt-3 flex items-start gap-2">
+                <StickyNote size={15} className="mt-2 opacity-50 shrink-0" />
+                <textarea
+                  defaultValue={highlight.note ?? ''}
+                  onBlur={(e) => {
+                    const note = e.target.value.trim();
+                    if (note !== (highlight.note ?? '')) {
+                      store.updateHighlight(highlight.id, { note: note || undefined });
+                    }
+                  }}
+                  placeholder="Add a note / annotation…"
+                  rows={highlight.note ? 2 : 1}
+                  className="flex-1 resize-y bg-app-text/5 border border-app-border rounded-md px-2 py-1.5 text-sm outline-none focus:border-accent/50 min-w-0"
+                />
+              </div>
+
+              <div className="mt-2 flex gap-1.5">
+                {HIGHLIGHT_COLORS.map(c => (
+                  <button
+                    key={c.key}
+                    title={c.label}
+                    onClick={() => store.updateHighlight(highlight.id, { color: c.key })}
+                    className={cn(
+                      'w-5 h-5 rounded-full border transition-transform hover:scale-110',
+                      (highlight.color ?? 'yellow') === c.key ? 'ring-2 ring-app-text scale-110' : 'border-app-border',
+                    )}
+                    style={{ background: c.bg }}
+                  />
+                ))}
+              </div>
             </div>
           ))}
         </div>

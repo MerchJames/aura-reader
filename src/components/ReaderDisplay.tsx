@@ -1,33 +1,68 @@
-import React, { useEffect, useRef } from 'react';
-import ReactMarkdown from 'react-markdown';
-import remarkGfm from 'remark-gfm';
-import { ChevronLeft, ChevronRight } from 'lucide-react';
+import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef } from 'react';
+import { ChevronLeft, ChevronRight, X } from 'lucide-react';
 import { useAppStore } from '../store';
+import { useAuraV2Store } from '../stores/useAuraV2Store';
 import { THEMES } from '../themes';
 import { cn } from '../utils/cn';
-import { Message } from '../types';
-import { balanceEmphasis, isDialogueText, processText } from '../utils/textProcessor';
+import { HIGHLIGHT_COLORS, Message, PinFormat } from '../types';
+import { paintHighlights } from '../utils/highlightPaint';
+import { resolveContent } from '../utils/lens';
+import { useEntityHighlighter } from './EntityTooltip';
 import { motion, AnimatePresence } from 'motion/react';
+import { MessageBlock } from './MessageBlock';
+import { SelectionPopover } from './SelectionPopover';
+import { AnnotationThread } from './AnnotationThread';
 
 /** Themes that read better without chat bubbles. */
-const MINIMAL_BUBBLE_THEMES = new Set(['book', 'notebook', 'essay']);
+const MINIMAL_BUBBLE_THEMES = new Set(['book', 'notebook', 'essay', 'newspaper']);
 
-const textOf = (children: React.ReactNode): string => {
-  if (typeof children === 'string') return children;
-  if (Array.isArray(children)) return children.map(textOf).join('');
-  if (React.isValidElement(children)) return textOf((children.props as any).children);
-  return '';
+/** Short human title for a captured visual: first meaningful line, de-marked. */
+const derivePinTitle = (content: string): string => {
+  const line = content
+    .replace(/<[^>]+>/g, ' ')
+    .replace(/[|`#*_>-]+/g, ' ')
+    .split('\n')
+    .map(l => l.replace(/\s+/g, ' ').trim())
+    .find(l => l.length > 2) ?? 'Pinned visual';
+  return line.length > 42 ? `${line.slice(0, 42).trimEnd()}…` : line;
 };
 
 export const ReaderDisplay = () => {
   const store = useAppStore();
+  const v2 = useAuraV2Store();
+  const storyId = store.currentStory?.id;
+  const overrides = storyId ? v2.overridesByStory[storyId] : undefined;
+  const lensOn = !!storyId && !!v2.lensOnByStory[storyId];
+  // Codex lore words get a whisper-quiet underline + hover tooltip.
+  // Identity function (zero cost) when the codex is off or still empty.
+  const markLore = useEntityHighlighter();
   const bottomRef = useRef<HTMLDivElement>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
+  // The currently-streaming message element — the focus target that the
+  // viewport tracks so the live text never trails out of sight.
+  const activeRef = useRef<HTMLDivElement>(null);
   // Follow the streaming text only while the reader is near the bottom;
   // scrolling up to reread suspends following until they return (or press play).
   const followRef = useRef(true);
+  // Distinguishes our own scroll writes from genuine user scrolls, so
+  // auto-following never gets mistaken for the reader taking control.
+  const programmaticRef = useRef(false);
 
   const [direction, setDirection] = React.useState(1);
+  const [lightbox, setLightbox] = React.useState<string | null>(null);
+  const [toast, setToast] = React.useState<string | null>(null);
+  const [dialogueTip, setDialogueTip] = React.useState<
+    { text: string; x: number; y: number; placement: 'top' | 'bottom' } | null
+  >(null);
+  const wasHighlightRef = useRef(false);
+
+  const [selPopover, setSelPopover] = React.useState<
+    { x: number; y: number; text: string; messageId?: string } | null
+  >(null);
+  const [noteDraft, setNoteDraft] = React.useState('');
+  const [threadOpen, setThreadOpen] = React.useState<
+    { messageId?: string; anchorText?: string } | null
+  >(null);
   const prevIndexRef = useRef(store.currentChainIndex);
 
   useEffect(() => {
@@ -37,25 +72,128 @@ export const ReaderDisplay = () => {
     }
   }, [store.currentChainIndex]);
 
+  // Scroll without it being counted as a user scroll (only when it moves).
+  const scrollTo = (el: HTMLDivElement, top: number) => {
+    const clamped = Math.max(0, Math.min(top, el.scrollHeight - el.clientHeight));
+    if (Math.abs(clamped - el.scrollTop) < 0.5) return;
+    programmaticRef.current = true;
+    el.scrollTop = clamped;
+  };
+
+  // Center the streaming line in the reading zone. In autofocus it sits higher
+  // (~55%) so the reader looks at one spot; otherwise it rides near the bottom.
+  const centerActive = () => {
+    const el = scrollRef.current;
+    if (!el) return;
+    const active = activeRef.current;
+    if (active) {
+      const focusRatio = store.isAutofocusMode ? 0.55 : 0.72;
+      const elRect = el.getBoundingClientRect();
+      const aRect = active.getBoundingClientRect();
+      const activeBottom = aRect.bottom - elRect.top + el.scrollTop;
+      scrollTo(el, activeBottom - el.clientHeight * focusRatio);
+    } else {
+      scrollTo(el, el.scrollHeight);
+    }
+  };
+
   useEffect(() => {
     if (store.isStreaming) {
       followRef.current = true;
-      bottomRef.current?.scrollIntoView({ behavior: 'smooth' });
+      requestAnimationFrame(centerActive);
     }
-  }, [store.isStreaming]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [store.isStreaming, store.isAutofocusMode]);
 
+  // Track the reveal BEFORE paint (useLayoutEffect) so the new character and
+  // the scroll adjustment land in the same frame — otherwise the text paints
+  // at the old position first, which reads as shaking.
+  useLayoutEffect(() => {
+    // Autofocus is hands-free: always follow. Otherwise honor scroll-up-to-pause.
+    if (!store.isStreaming) return;
+    if (!store.isAutofocusMode && !followRef.current) return;
+    centerActive();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [
+    store.streamedText, store.visibleMessages.length, store.isStreaming,
+    store.isAutofocusMode, store.autofocusZoom, store.layoutMode,
+  ]);
+
+  // Entering autofocus: snap to the streaming line at once and, handsfree,
+  // start playback so the view follows along immediately.
   useEffect(() => {
-    if (store.isStreaming && store.layoutMode === 'continuous' && followRef.current) {
-      const el = scrollRef.current;
-      if (el) el.scrollTop = el.scrollHeight;
-    }
-  }, [store.streamedText, store.visibleMessages.length, store.layoutMode, store.isStreaming]);
+    if (!store.isAutofocusMode) return;
+    followRef.current = true;
+    const id = requestAnimationFrame(() => requestAnimationFrame(centerActive));
+    if (!store.isStreaming && store.streamingMessage) store.setIsStreaming(true);
+    // Entering fullscreen or resizing changes the viewport — re-center on it.
+    const recenter = () => requestAnimationFrame(centerActive);
+    window.addEventListener('resize', recenter);
+    document.addEventListener('fullscreenchange', recenter);
+    return () => {
+      cancelAnimationFrame(id);
+      window.removeEventListener('resize', recenter);
+      document.removeEventListener('fullscreenchange', recenter);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [store.isAutofocusMode]);
 
   const handleScroll = () => {
     const el = scrollRef.current;
     if (!el) return;
+    // Ignore the scroll event our own centering just produced.
+    if (programmaticRef.current) { programmaticRef.current = false; return; }
     followRef.current = el.scrollHeight - el.scrollTop - el.clientHeight < 160;
   };
+
+  // Paint saved highlights back onto the text (CSS Custom Highlight API), so a
+  // highlight is actually visible in place — not just an entry in the panel.
+  // Runs on structural changes only (not per streamed char): committed text
+  // nodes are stable while a later message streams.
+  const highlights = store.currentStory?.highlights;
+  useEffect(() => {
+    const id = requestAnimationFrame(() => paintHighlights(scrollRef.current, highlights ?? []));
+    return () => cancelAnimationFrame(id);
+  }, [
+    highlights, store.visibleMessages.length, store.viewMode,
+    store.currentChainIndex, store.layoutMode, store.searchQuery, store.isStreaming,
+  ]);
+
+  // Highlight mode (hold F): pause streaming on entry so the DOM stops churning
+  // and a selection can hold; on exit (F released) capture the selection as a
+  // highlight — which the paint effect then makes visible immediately.
+  useEffect(() => {
+    const was = wasHighlightRef.current;
+    wasHighlightRef.current = store.isHighlightMode;
+    if (store.isHighlightMode && !was) {
+      if (store.isStreaming) store.setIsStreaming(false);
+      return;
+    }
+    if (!store.isHighlightMode && was) {
+      const sel = window.getSelection();
+      const text = sel?.toString().trim();
+      if (!text) return;
+      let node: Node | null = sel!.anchorNode;
+      let messageId: string | undefined;
+      while (node && node !== document.body) {
+        if (node instanceof HTMLElement && node.dataset.msgId) { messageId = node.dataset.msgId; break; }
+        node = node.parentNode;
+      }
+      store.addHighlight({
+        id: Math.random().toString(36).slice(2, 9),
+        text, messageId, timestamp: Date.now(), color: 'yellow',
+      });
+      sel?.removeAllRanges();
+      setToast('Highlighted');
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [store.isHighlightMode]);
+
+  useEffect(() => {
+    if (!toast) return;
+    const t = setTimeout(() => setToast(null), 1400);
+    return () => clearTimeout(t);
+  }, [toast]);
 
   useEffect(() => {
     if (!store.isAutofocusMode) return;
@@ -78,6 +216,71 @@ export const ReaderDisplay = () => {
     return () => window.removeEventListener('keydown', handleKeyDown);
   }, [store.isAutofocusMode]);
 
+  const themeDef = THEMES[store.theme] ?? THEMES.dark;
+  const minimalBubbles = MINIMAL_BUBBLE_THEMES.has(store.theme);
+
+  // Note counts per message, for the subtle gutter markers.
+  const annotations = storyId ? v2.annotationsByStory[storyId] : undefined;
+  const noteCounts = useMemo(() => {
+    const m = new Map<string, number>();
+    for (const a of annotations ?? []) m.set(a.messageId, (m.get(a.messageId) ?? 0) + 1);
+    return m;
+  }, [annotations]);
+
+  const openNotes = useCallback((id: string) => setThreadOpen({ messageId: id }), []);
+
+  const pinContent = useCallback((messageId: string, content: string, format: PinFormat) => {
+    const sid = useAppStore.getState().currentStory?.id;
+    if (!sid) return;
+    useAuraV2Store.getState().addPin(sid, {
+      title: derivePinTitle(content),
+      format,
+      content,
+      messageId,
+      inContext: false,
+      docked: true,
+    });
+    setToast('Pinned to the side');
+  }, []);
+
+  // Build a fast message-id → chain lookup once per chains change, instead of
+  // scanning every chain for every message on every render.
+  const chainByMessageId = useMemo(() => {
+    const map = new Map<string, typeof store.chains[0]>();
+    for (const chain of store.chains) {
+      for (const m of chain.messages) map.set(m.id, chain);
+    }
+    return map;
+  }, [store.chains]);
+
+  const resolveMsgAnim = useCallback((msg: Message) => {
+    const chain = chainByMessageId.get(msg.id);
+    return (chain?.starred && chain?.starSettings?.animationStyle)
+      || (store.themeEffects && themeDef.animation)
+      || store.animationStyle;
+  }, [chainByMessageId, store.themeEffects, themeDef.animation, store.animationStyle]);
+
+  const handleMessageClick = useCallback((id: string) => {
+    // Ignore the click that ends a text selection (the reader was highlighting).
+    if (window.getSelection()?.toString().trim()) return;
+    const s = useAppStore.getState();
+    if (id === s.streamingMessage?.id) {
+      s.setIsStreaming(!s.isStreaming);
+    } else {
+      s.restreamFromId(id);
+    }
+  }, []);
+
+  const showDialogueTip = useCallback((e: React.MouseEvent<HTMLElement>, text: string) => {
+    const r = e.currentTarget.getBoundingClientRect();
+    const placement: 'top' | 'bottom' = r.top < 170 ? 'bottom' : 'top';
+    setDialogueTip({ text, x: r.left + r.width / 2, y: placement === 'top' ? r.top : r.bottom, placement });
+  }, []);
+
+  const hideDialogueTip = useCallback(() => setDialogueTip(null), []);
+
+  // All hooks must run before this bail-out — an empty story that later gains
+  // chains would otherwise change the hook order and crash the reader.
   if (store.chains.length === 0) {
     return (
       <div className="flex-1 flex items-center justify-center opacity-50 h-[80vh]">
@@ -86,180 +289,140 @@ export const ReaderDisplay = () => {
     );
   }
 
-  const themeDef = THEMES[store.theme] ?? THEMES.dark;
-  const minimalBubbles = MINIMAL_BUBBLE_THEMES.has(store.theme);
+  const matchesSearch = (msg: Message) => {
+    if (!store.searchQuery) return true;
+    const q = store.searchQuery.toLowerCase();
+    const content = resolveContent(msg, overrides, lensOn).toLowerCase();
+    return content.includes(q) || msg.name.toLowerCase().includes(q);
+  };
 
-  const matchesSearch = (msg: Message) =>
-    !store.searchQuery ||
-    msg.content.toLowerCase().includes(store.searchQuery.toLowerCase()) ||
-    msg.name.toLowerCase().includes(store.searchQuery.toLowerCase());
-
-  const handleMessageClick = (id: string) => {
-    if (id === store.streamingMessage?.id) {
-      store.setIsStreaming(!store.isStreaming);
-    } else {
-      store.restreamFromId(id);
+  const handleTextMouseUp = () => {
+    // While holding F (highlight mode) the release captures the selection with a
+    // default color — don't also pop the color/note picker.
+    if (store.isHighlightMode) return;
+    const sel = window.getSelection();
+    if (!sel || sel.isCollapsed) { setSelPopover(null); return; }
+    const text = sel.toString().trim();
+    if (!text) { setSelPopover(null); return; }
+    const rect = sel.getRangeAt(0).getBoundingClientRect();
+    let node: Node | null = sel.anchorNode;
+    let messageId: string | undefined;
+    while (node && node !== document.body) {
+      if (node instanceof HTMLElement && node.dataset.msgId) { messageId = node.dataset.msgId; break; }
+      node = node.parentNode;
     }
+    setNoteDraft('');
+    setSelPopover({ x: rect.left + rect.width / 2, y: rect.top, text, messageId });
   };
 
-  const renderContent = (msg: Message, content: string, isStreamingMsg: boolean) => {
-    const msgChain = store.chains.find(c => c.messages.some(m => m.id === msg.id));
-    const msgAnim = (msgChain?.starred && msgChain?.starSettings?.animationStyle) || store.animationStyle;
-
-    // The streaming message receives pre-processed partial text from the
-    // streamer (dangling emphasis closed so partial *spans* render styled);
-    // committed messages are processed here in full.
-    const processedText = isStreamingMsg
-      ? balanceEmphasis(content)
-      : processText(content, {
-          hideMetadata: store.hideMetadata,
-          autoFormat: store.autoFormat,
-          autoFormatRules: store.autoFormatRules,
-          paragraphSpacing: store.paragraphSpacing,
-          dialogueOwnLine: store.dialogueOwnLine,
-          smartTypography: store.smartTypography,
-          styleQuotes: store.styleQuotes,
-          substituteNames: store.substituteNames,
-          characterName: store.currentStory?.characterName,
-          userName: store.currentStory?.userName,
-          role: msg.role,
-        }).processedText;
-
-    return (
-      <div
-        className={cn(
-          'markdown-body max-w-none',
-          msgAnim === 'smooth' && isStreamingMsg && 'animate-smooth-reveal',
-          msgAnim === 'magic' && isStreamingMsg && 'animate-magic-reveal',
-          msgAnim === 'fade' && isStreamingMsg && 'animate-fade-in',
-        )}
-      >
-        <ReactMarkdown
-          remarkPlugins={[remarkGfm]}
-          components={{
-            em: ({ node: _node, ...props }) => {
-              const dialogue = isDialogueText(textOf(props.children));
-              if (!dialogue) {
-                // Action / inner-thought emphasis
-                return <em className="italic opacity-90" {...props} />;
-              }
-              const animate = isStreamingMsg && store.isStreaming;
-              return (
-                <em
-                  className={cn(
-                    store.dialogueColor,
-                    store.dialogueStyle === 'italic' || store.dialogueStyle === 'bold-italic'
-                      ? 'italic' : 'not-italic',
-                    store.dialogueStyle === 'bold' || store.dialogueStyle === 'bold-italic'
-                      ? 'font-bold' : 'font-medium',
-                    animate && store.dialogueAnimation === 'zoom' && 'animate-dialogue-zoom inline-block',
-                    animate && store.dialogueAnimation === 'pulse' && 'animate-dialogue-pulse inline-block',
-                    animate && store.dialogueAnimation === 'wave' && 'animate-dialogue-wave inline-block',
-                  )}
-                  {...props}
-                />
-              );
-            },
-            strong: ({ node: _node, ...props }) => (
-              <strong className="font-bold text-amber-600 dark:text-amber-400" {...props} />
-            ),
-          }}
-        >
-          {processedText}
-        </ReactMarkdown>
-        {isStreamingMsg && (
-          <span
-            className={cn(
-              'inline-block w-2 h-4 ml-1 align-middle animate-pulse',
-              msgAnim === 'magic'
-                ? 'bg-purple-500 shadow-[0_0_8px_2px_rgba(168,85,247,0.8)]'
-                : 'bg-current',
-            )}
-          />
-        )}
-      </div>
-    );
+  const saveHighlight = (color: string) => {
+    if (!selPopover) return;
+    store.addHighlight({
+      id: Math.random().toString(36).slice(2, 9),
+      text: selPopover.text,
+      messageId: selPopover.messageId,
+      timestamp: Date.now(),
+      note: noteDraft.trim() || undefined,
+      color,
+    });
+    window.getSelection()?.removeAllRanges();
+    setSelPopover(null);
+    setToast('Highlighted');
   };
 
-  const renderMessage = (msg: Message, content: string, isStreamingMsg = false) => {
+  const saveAnnotation = () => {
+    if (!selPopover?.messageId) return;
+    const note = noteDraft.trim();
+    if (!note && !selPopover.text) return;
+    v2.addAnnotation(storyId!, {
+      messageId: selPopover.messageId,
+      anchorText: selPopover.text || undefined,
+      note: note || selPopover.text,
+    });
+    window.getSelection()?.removeAllRanges();
+    setSelPopover(null);
+    setNoteDraft('');
+    setToast('Note saved');
+  };
+
+  const renderBlock = (msg: Message, content: string, isStreamingMsg = false) => {
+    const chain = chainByMessageId.get(msg.id);
+    const isMsgZoomed = !!chain?.starred && !!chain?.starSettings?.zoom;
     const isUser = msg.role === 'user';
-    const msgChain = store.chains.find(c => c.messages.some(m => m.id === msg.id));
-    const isMsgZoomed = msgChain?.starred && msgChain?.starSettings?.zoom;
-    const avatar = msg.avatar ?? (!isUser ? store.currentStory?.avatar : undefined);
+    // Reader-supplied profile pictures win, then per-character avatars for
+    // group chats, then the story's own fallback avatar.
+    const avatar = msg.avatar ?? (isUser
+      ? store.currentStory?.userAvatar
+      : store.currentStory?.characterAvatars?.[msg.name]
+        ?? store.currentStory?.characterAvatar
+        ?? store.currentStory?.avatar);
 
-    if (store.viewMode === 'storybook') {
-      return (
-        <div
-          key={msg.id}
-          onClick={() => handleMessageClick(msg.id)}
-          title={isStreamingMsg ? 'Click to play/pause' : 'Click to replay from here'}
-          className={cn(
-            'mb-8 cursor-pointer hover:bg-app-text/5 transition-all duration-500 p-4 rounded-xl',
-            isStreamingMsg ? 'opacity-100' : 'opacity-90',
-            isUser && 'italic opacity-80 border-l-2 border-app-border pl-4 ml-2',
-            isMsgZoomed && 'scale-105 transform origin-left shadow-lg bg-app-text/5 my-12',
-          )}
-        >
-          {renderContent(msg, content, isStreamingMsg)}
-        </div>
-      );
-    }
-
-    // Chat mode
     return (
-      <div
+      <MessageBlock
         key={msg.id}
-        onClick={() => handleMessageClick(msg.id)}
-        title={isStreamingMsg ? 'Click to play/pause' : 'Click to replay from here'}
-        className={cn(
-          'flex w-full mb-6 cursor-pointer group transition-all duration-500 gap-3',
-          isUser ? 'justify-end flex-row-reverse' : 'justify-start',
-          isMsgZoomed && cn('scale-105 transform my-8', isUser ? 'origin-right' : 'origin-left'),
-        )}
-      >
-        {avatar && !isUser && !minimalBubbles && (
-          <img
-            src={avatar}
-            alt={msg.name}
-            className="w-10 h-10 rounded-full object-cover shrink-0 ring-2 ring-app-border"
-            referrerPolicy="no-referrer"
-          />
-        )}
-        <div
-          className={cn(
-            'max-w-[80%] px-5 py-4 relative transition-all',
-            minimalBubbles
-              ? 'rounded-none border-b border-app-border shadow-none max-w-full w-full'
-              : cn(
-                  'rounded-2xl shadow-md group-hover:ring-2 ring-accent/40',
-                  isUser
-                    ? 'bg-bubble-user text-bubble-user-text rounded-br-sm'
-                    : 'bg-bubble-ai rounded-bl-sm border border-app-border/60',
-                ),
-            isMsgZoomed && 'ring-2 ring-yellow-500/50 shadow-xl',
-          )}
-        >
-          <div className="text-xs font-bold mb-2 opacity-70 uppercase tracking-wider">
-            {msg.name}
-          </div>
-          {renderContent(msg, content, isStreamingMsg)}
-        </div>
-      </div>
+        msg={msg}
+        content={content}
+        rawContent={msg.content}
+        hasOverride={!!storyId && !!overrides?.some(o => o.messageId === msg.id)}
+        noteCount={noteCounts.get(msg.id) ?? 0}
+        onOpenNotes={openNotes}
+        onPinContent={pinContent}
+        streamEffect={store.streamEffect}
+        isStreamingMsg={isStreamingMsg}
+        isMsgZoomed={isMsgZoomed}
+        avatar={avatar}
+        msgAnim={resolveMsgAnim(msg)}
+        theme={store.theme}
+        themeDef={themeDef}
+        minimalBubbles={minimalBubbles}
+        isAutofocusMode={store.isAutofocusMode}
+        viewMode={store.viewMode}
+        phoneDialogueOnly={store.phoneDialogueOnly}
+        dialogueColor={store.dialogueColor}
+        dialogueStyle={store.dialogueStyle}
+        dialogueAnimation={store.dialogueAnimation}
+        hideMetadata={store.hideMetadata}
+        oocHandling={store.oocHandling}
+        autoFormat={store.autoFormat}
+        autoFormatRules={store.autoFormatRules}
+        statRules={store.statRules}
+        paragraphSpacing={store.paragraphSpacing}
+        dialogueOwnLine={store.dialogueOwnLine}
+        smartTypography={store.smartTypography}
+        styleQuotes={store.styleQuotes}
+        substituteNames={store.substituteNames}
+        characterName={store.currentStory?.characterName}
+        userName={store.currentStory?.userName}
+        showImages={store.showImages}
+        swipeSelections={store.swipeSelections}
+        activeRef={activeRef}
+        onMessageClick={handleMessageClick}
+        onImageClick={setLightbox}
+        onShowDialogueTip={showDialogueTip}
+        onHideDialogueTip={hideDialogueTip}
+        markLore={markLore}
+        onSelectSwipe={store.selectSwipe}
+      />
     );
   };
 
-  const maxWidth = themeDef.maxWidth
-    ?? (store.viewMode === 'storybook' ? 'max-w-[65ch]' : 'max-w-4xl');
+  // A custom content width (px) overrides the theme's default column width.
+  const customWidth = store.contentWidth > 0;
+  const maxWidth = customWidth
+    ? ''
+    : themeDef.maxWidth ?? (store.viewMode === 'storybook' ? 'max-w-[65ch]' : 'max-w-4xl');
 
   return (
+    <>
     <div
       ref={scrollRef}
       onScroll={handleScroll}
+      onMouseUp={handleTextMouseUp}
       className={cn(
-        'flex-1 overflow-y-auto pb-44 transition-all duration-500',
-        store.isAutofocusMode && 'overflow-x-hidden',
+        'flex-1 min-h-0 overflow-y-auto pb-44 transition-all duration-500',
+        store.isAutofocusMode && 'overflow-x-hidden pb-[45vh]',
       )}
-      style={{ fontSize: `${store.fontSize}px` }}
+      style={{ fontSize: `${store.fontSize * (store.isAutofocusMode ? store.autofocusZoom : 1)}px` }}
     >
       {store.isAutofocusMode && (
         <div className="fixed top-20 left-1/2 -translate-x-1/2 z-40 flex gap-2">
@@ -276,15 +439,17 @@ export const ReaderDisplay = () => {
 
       <div
         className={cn('reader-page mx-auto pt-8 px-4 min-h-[80vh]', maxWidth,
+          `view-${store.viewMode}`,
           (store.theme === 'book' || store.theme === 'essay') && 'py-12',
           store.theme === 'phone' && 'border-x border-app-border shadow-2xl min-h-screen pt-4 bg-app-bg',
         )}
         style={{
-          transform: store.isAutofocusMode
-            ? `scale(${store.autofocusZoom}) translateX(${store.autofocusPanX}px)`
+          transform: store.isAutofocusMode && store.autofocusPanX
+            ? `translateX(${store.autofocusPanX}px)`
             : 'none',
           transition: 'transform 0.3s ease-out',
           transformOrigin: 'top center',
+          ...(customWidth ? { maxWidth: `${store.contentWidth}px` } : null),
         }}
       >
         {store.layoutMode === 'paginated' && (
@@ -311,9 +476,10 @@ export const ReaderDisplay = () => {
 
         {store.layoutMode === 'continuous' ? (
           <>
-            {store.visibleMessages.filter(matchesSearch).map(msg => renderMessage(msg, msg.content))}
+            {store.visibleMessages.filter(matchesSearch).map(msg =>
+              renderBlock(msg, resolveContent(msg, overrides, lensOn)))}
             {store.streamingMessage && matchesSearch(store.streamingMessage) &&
-              renderMessage(store.streamingMessage, store.streamedText, true)}
+              renderBlock(store.streamingMessage, store.streamedText, true)}
             <div ref={bottomRef} className="h-10" />
           </>
         ) : (
@@ -339,14 +505,82 @@ export const ReaderDisplay = () => {
                 transition={{ duration: 0.7, ease: [0.32, 0.72, 0, 1] }}
                 className="min-h-[50vh]"
               >
-                {store.visibleMessages.filter(matchesSearch).map(msg => renderMessage(msg, msg.content))}
+                {store.visibleMessages.filter(matchesSearch).map(msg =>
+                  renderBlock(msg, resolveContent(msg, overrides, lensOn)))}
                 {store.streamingMessage && matchesSearch(store.streamingMessage) &&
-                  renderMessage(store.streamingMessage, store.streamedText, true)}
+                  renderBlock(store.streamingMessage, store.streamedText, true)}
               </motion.div>
             </AnimatePresence>
           </div>
         )}
       </div>
     </div>
+
+    {selPopover && (
+      <SelectionPopover
+        sel={selPopover}
+        noteDraft={noteDraft}
+        setNoteDraft={setNoteDraft}
+        onClose={() => setSelPopover(null)}
+        onHighlight={(color) => saveHighlight(color)}
+        onNote={() => saveAnnotation()}
+        onPin={() => {
+          if (!selPopover.messageId) return;
+          pinContent(selPopover.messageId, selPopover.text, 'markdown');
+          window.getSelection()?.removeAllRanges();
+          setSelPopover(null);
+        }}
+        onAskAi={() => {
+          setThreadOpen({ messageId: selPopover.messageId, anchorText: selPopover.text });
+          window.getSelection()?.removeAllRanges();
+          setSelPopover(null);
+          setNoteDraft('');
+        }}
+      />
+    )}
+
+    {threadOpen && (
+      <AnnotationThread
+        messageId={threadOpen.messageId}
+        anchorText={threadOpen.anchorText}
+        onClose={() => setThreadOpen(null)}
+      />
+    )}
+
+    {toast && (
+      <div className="fixed bottom-24 left-1/2 -translate-x-1/2 z-[75] px-4 py-2 rounded-full bg-app-text text-app-bg text-sm font-medium shadow-xl pointer-events-none">
+        {toast}
+      </div>
+    )}
+
+    {dialogueTip && (
+      <div
+        className="fixed z-[80] w-64 max-w-[70vw] px-3 py-2 rounded-xl bg-app-text text-app-bg text-xs leading-relaxed shadow-2xl pointer-events-none"
+        style={{
+          left: Math.min(Math.max(dialogueTip.x, 140), window.innerWidth - 140),
+          top: dialogueTip.placement === 'top' ? dialogueTip.y - 8 : dialogueTip.y + 8,
+          transform: dialogueTip.placement === 'top'
+            ? 'translate(-50%, -100%)'
+            : 'translate(-50%, 0)',
+        }}
+      >
+        {dialogueTip.text}
+      </div>
+    )}
+
+    {lightbox && (
+      <div
+        className="fixed inset-0 z-[60] bg-black/90 backdrop-blur-sm flex items-center justify-center p-6 cursor-zoom-out"
+        onClick={() => setLightbox(null)}
+      >
+        <img
+          src={lightbox}
+          alt=""
+          className="max-w-full max-h-full rounded-lg shadow-2xl object-contain"
+          referrerPolicy="no-referrer"
+        />
+      </div>
+    )}
+    </>
   );
 };

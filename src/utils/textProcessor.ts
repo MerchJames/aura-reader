@@ -1,7 +1,9 @@
-import { AutoFormatRule, Role } from '../types';
+import { AutoFormatRule, OocHandling, Role } from '../types';
 
 export interface ProcessOptions {
   hideMetadata?: boolean;
+  /** How to treat [OOC: ...] / (OOC: ...) out-of-character asides. */
+  oocHandling?: OocHandling;
   autoFormat?: boolean;
   autoFormatRules?: AutoFormatRule[];
   /** Auto-format sub-features; default on except dialogueOwnLine/smartTypography. */
@@ -39,8 +41,26 @@ export const ruleError = (rule: AutoFormatRule): string | null => {
   }
 };
 
+/** Matches an OOC aside: [OOC: ...] or (OOC: ...), case-insensitive. */
+const OOC_RE = /([[(])\s*OOC\b[^\])]*[\])]/gi;
+
+/** Apply the reader's OOC preference: leave, dim (italic-muted), or remove. */
+export const applyOoc = (text: string, mode: OocHandling = 'show'): string => {
+  if (mode === 'show') return text;
+  if (mode === 'hide') {
+    // Drop the aside and tidy up the whitespace/blank line it leaves behind.
+    return text.replace(OOC_RE, '').replace(/[ \t]{2,}/g, ' ').replace(/\n{3,}/g, '\n\n');
+  }
+  // dim: wrap in emphasis so it renders muted-italic (strip inner * to stay valid).
+  return text.replace(OOC_RE, m => `*${m.replace(/\*/g, '')}*`);
+};
+
+/** Convert inline <img> HTML into markdown images so they render natively. */
+export const normalizeImages = (text: string): string =>
+  text.replace(/<img\b[^>]*?\bsrc\s*=\s*["']([^"']+)["'][^>]*>/gi, (_m, src) => `\n\n![](${src})\n\n`);
+
 export const processText = (text: string, opts: ProcessOptions = {}) => {
-  let processed = text;
+  let processed = applyOoc(normalizeImages(text), opts.oocHandling);
 
   if (opts.substituteNames) {
     if (opts.characterName) processed = processed.replace(/\{\{char\}\}/gi, opts.characterName);
@@ -83,6 +103,14 @@ export const processText = (text: string, opts: ProcessOptions = {}) => {
     }
 
     processed = processed.replace(/\n{3,}/g, '\n\n');
+
+    // Prevent stray bullet lists: after paragraph-splitting, any line the author
+    // began with `*`, `-`, or `+ ` (an action asterisk or a dash — never a real
+    // list in prose roleplay) gets parsed by markdown as a list item. Escape a
+    // leading marker that is followed by a space so it renders literally.
+    // A leading `*word*` action has no space after the `*`, so it's untouched.
+    processed = processed.replace(/^([ \t]*)([-+])([ \t]+)/gm, '$1\\$2$3');
+    processed = processed.replace(/^([ \t]*)\*([ \t]+)/gm, '$1\\*$2');
   }
 
   if (opts.styleQuotes) {
@@ -113,7 +141,10 @@ export const isDialogueText = (text: string): boolean => /^["'“‘]/.test(text
  * styled (italic/bold applied live) instead of showing literal asterisks.
  */
 export const balanceEmphasis = (text: string): string => {
-  let out = text;
+  // Drop a trailing, content-less marker run (e.g. "he said *" mid-type) so
+  // the span's styling doesn't flip on/off — the main cause of "shaking" as
+  // characters reveal past an asterisk or quote.
+  let out = text.replace(/(?:\*{1,3}|_{1,3}|`+)$/, '');
   const boldCount = (out.match(/\*\*/g) ?? []).length;
   if (boldCount % 2 === 1) out += '**';
   const singleCount = (out.replace(/\*\*/g, '').match(/\*/g) ?? []).length;
@@ -121,6 +152,21 @@ export const balanceEmphasis = (text: string): string => {
   const ticks = (out.match(/`/g) ?? []).length;
   if (ticks % 2 === 1) out += '`';
   return out;
+};
+
+/**
+ * For the live-streaming message only: drop the trailing in-progress word so
+ * the rendered text never contains a partial word that grows and re-wraps at
+ * the right margin every frame (the residual "streaming shake"). The hidden
+ * final word appears as soon as its terminating space/newline streams in, or
+ * when the message commits. Left untouched when there's no whitespace yet.
+ */
+export const truncateToWord = (text: string): string => {
+  // Already ends on a boundary — nothing in progress to hide.
+  if (!text || /\s$/.test(text)) return text;
+  const lastBreak = Math.max(text.lastIndexOf(' '), text.lastIndexOf('\n'));
+  if (lastBreak <= 0) return text; // single unbroken token — show it
+  return text.slice(0, lastBreak + 1);
 };
 
 /** Strip markdown/markup for text-to-speech. */

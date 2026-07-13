@@ -1,5 +1,6 @@
 import { useEffect, useRef } from 'react';
 import { useAppStore } from '../store';
+import { useAuraV2Store } from '../stores/useAuraV2Store';
 
 const isTyping = (e: KeyboardEvent) =>
   e.target instanceof HTMLInputElement ||
@@ -15,7 +16,8 @@ const isTyping = (e: KeyboardEvent) =>
  *   Q tap        slower   |  Q hold: rewind while held
  *   E tap        faster   |  E hold: 3x boost while held
  *   F hold       (autofocus) highlight selection on release
- *   Escape       exit autofocus / close settings
+ *   M            multiverse (story map)     C  codex sidebar
+ *   Escape       close multiverse/codex / exit autofocus / close settings
  */
 export const useKeyboardShortcuts = () => {
   const heldQ = useRef(false);
@@ -44,7 +46,9 @@ export const useKeyboardShortcuts = () => {
           if (e.ctrlKey || e.metaKey) {
             e.preventDefault();
             document.getElementById('search-input')?.focus();
-          } else if (s.isAutofocusMode && !heldF.current) {
+          } else if (s.screen === 'reader' && !heldF.current) {
+            // Hold F to enter highlight mode; ReaderDisplay pauses streaming so a
+            // selection can hold, and captures it when F is released.
             heldF.current = true;
             s.setIsHighlightMode(true);
           }
@@ -80,10 +84,36 @@ export const useKeyboardShortcuts = () => {
           }, HOLD_MS);
           break;
 
-        case 'escape':
-          if (s.settingsOpen) s.setSettingsOpen(false);
+        case 'm':
+          if (s.screen === 'reader') {
+            const v2 = useAuraV2Store.getState();
+            v2.setMultiverseOpen(!v2.multiverseOpen);
+          }
+          break;
+
+        case 'c':
+          if (s.screen === 'reader') {
+            const v2 = useAuraV2Store.getState();
+            v2.setCodexOpen(!v2.codexOpen);
+          }
+          break;
+
+        case 's':
+          if (s.screen === 'reader') {
+            const v2 = useAuraV2Store.getState();
+            v2.setSheetsOpen(!v2.sheetsOpen);
+          }
+          break;
+
+        case 'escape': {
+          const v2 = useAuraV2Store.getState();
+          if (v2.multiverseOpen) v2.setMultiverseOpen(false);
+          else if (v2.sheetsOpen) v2.setSheetsOpen(false);
+          else if (v2.codexOpen) v2.setCodexOpen(false);
+          else if (s.settingsOpen) s.setSettingsOpen(false);
           else if (s.isAutofocusMode) s.setIsAutofocusMode(false);
           break;
+        }
       }
     };
 
@@ -95,18 +125,9 @@ export const useKeyboardShortcuts = () => {
         case 'f':
           if (heldF.current) {
             heldF.current = false;
+            // ReaderDisplay watches this transition and captures the current
+            // selection (with the right message id) as a highlight.
             s.setIsHighlightMode(false);
-            const selection = window.getSelection();
-            const text = selection?.toString().trim();
-            if (text) {
-              s.addHighlight({
-                id: Math.random().toString(36).substring(2, 9),
-                text,
-                messageId: s.streamingMessage?.id ?? s.visibleMessages.at(-1)?.id,
-                timestamp: Date.now(),
-              });
-              selection?.removeAllRanges();
-            }
           }
           break;
 

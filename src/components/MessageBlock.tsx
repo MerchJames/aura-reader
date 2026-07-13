@@ -1,0 +1,821 @@
+import React, { useEffect, useMemo, useRef, useState } from 'react';
+import ReactMarkdown from 'react-markdown';
+import remarkGfm from 'remark-gfm';
+import { ChevronLeft, ChevronRight, MessageSquare, Pencil, Pin as PinIcon } from 'lucide-react';
+import { cn } from '../utils/cn';
+import {
+  AnimationStyle,
+  AutoFormatRule,
+  DialogueAnimation,
+  DialogueStyle,
+  Message,
+  OocHandling,
+  PinFormat,
+  StatRule,
+  StreamEffect,
+  Theme,
+  ViewMode,
+} from '../types';
+import { ThemeDef } from '../themes';
+import {
+  balanceEmphasis,
+  isDialogueText,
+  processText,
+  truncateToWord,
+} from '../utils/textProcessor';
+import { buildStatPanel, isBarStat, StatEntry } from '../utils/statFormatter';
+
+/** Strip markdown markers for a plain-text context preview. */
+const plainish = (t: string): string =>
+  t.replace(/[*_`]+/g, '').replace(/\s+/g, ' ').trim();
+
+/**
+ * Pull quoted spans out of a message for the phone "dialogue only" mode, each
+ * paired with the narration surrounding it (from the previous line to the next)
+ * so hovering a bubble can reveal the text around it.
+ */
+const extractDialogueSegments = (text: string): { quote: string; context: string }[] => {
+  const re = /["“]([^"”\n]{1,400})["”]/g;
+  const matches: { inner: string; start: number; end: number }[] = [];
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(text))) {
+    if (m[1].trim()) matches.push({ inner: m[1].trim(), start: m.index, end: re.lastIndex });
+  }
+  return matches.map((mm, i) => {
+    const from = i > 0 ? matches[i - 1].end : 0;
+    const to = i < matches.length - 1 ? matches[i + 1].start : text.length;
+    const context = plainish(text.slice(from, to));
+    return { quote: mm.inner, context };
+  });
+};
+
+/** Deterministic color from a name, for fallback avatars. */
+const avatarColor = (name: string): string => {
+  let h = 0;
+  for (let i = 0; i < name.length; i++) h = (h * 31 + name.charCodeAt(i)) >>> 0;
+  return `hsl(${h % 360} 52% 45%)`;
+};
+
+const Avatar = ({ name, src }: { name: string; src?: string }) =>
+  src ? (
+    <img
+      src={src}
+      alt={name}
+      className="w-10 h-10 rounded-full object-cover shrink-0 ring-2 ring-app-border"
+      referrerPolicy="no-referrer"
+    />
+  ) : (
+    <div
+      className="w-10 h-10 rounded-full shrink-0 ring-2 ring-app-border flex items-center justify-center text-white font-bold text-sm select-none"
+      style={{ background: avatarColor(name || '?') }}
+      aria-hidden
+    >
+      {(name?.trim()?.[0] ?? '?').toUpperCase()}
+    </div>
+  );
+
+const StatPanel = ({ entries }: { entries: StatEntry[] }) => {
+  const table = entries.some(e => e.display === 'table');
+  if (table) {
+    return (
+      <div className="mb-3 overflow-hidden rounded-lg border border-app-border/60 bg-app-text/5">
+        <table className="w-full text-sm">
+          <tbody>
+            {entries.map((e, i) => (
+              <tr key={i} className="border-b border-app-border/40 last:border-0">
+                <td className="px-3 py-1.5 font-medium opacity-80 w-1/3">{e.key}</td>
+                <td className="px-3 py-1.5">{e.value}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    );
+  }
+  return (
+    <div className="flex flex-wrap gap-2 mb-3">
+      {entries.map((e, i) => {
+        const bar = isBarStat(e.key, e.value);
+        const numeric = parseFloat(e.value);
+        return (
+          <div
+            key={i}
+            className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs bg-app-text/10 border border-app-border/40"
+          >
+            <span className="font-medium opacity-80">{e.key}</span>
+            <span className="opacity-100">{e.value}</span>
+            {bar && !Number.isNaN(numeric) && (
+              <div className="w-12 h-1.5 rounded-full bg-app-text/20 overflow-hidden">
+                <div
+                  className="h-full rounded-full bg-accent"
+                  style={{ width: `${Math.min(100, Math.max(0, numeric))}%` }}
+                />
+              </div>
+            )}
+          </div>
+        );
+      })}
+    </div>
+  );
+};
+
+/**
+ * Terminal "decrypt" caret: a short run of glyphs cycling ahead of the
+ * revealed text. The scramble lives entirely in the caret so the real
+ * (markdown-rendered) text is never corrupted by random characters.
+ */
+const DECRYPT_GLYPHS = '!<>-_\\/[]{}—=+*^?#$%&01';
+const DecryptCaret = () => {
+  const [glyphs, setGlyphs] = useState('▓▒░');
+  useEffect(() => {
+    const id = setInterval(() => {
+      let out = '';
+      for (let i = 0; i < 3; i++) {
+        out += DECRYPT_GLYPHS[Math.floor(Math.random() * DECRYPT_GLYPHS.length)];
+      }
+      setGlyphs(out);
+    }, 66);
+    return () => clearInterval(id);
+  }, []);
+  return <span className="decrypt-caret font-mono ml-0.5" aria-hidden>{glyphs}</span>;
+};
+
+const textOf = (children: React.ReactNode): string => {
+  if (typeof children === 'string') return children;
+  if (Array.isArray(children)) return children.map(textOf).join('');
+  if (React.isValidElement(children)) return textOf((children.props as any).children);
+  return '';
+};
+
+/* ------------------------------------------------------------------ */
+/* Streaming word-reveal                                               */
+/* ------------------------------------------------------------------ */
+
+/** Max words animated at the streaming tail. Older words settle to plain text. */
+const WORD_REVEAL_CAP = 24;
+/** Stagger between tail words (ms). */
+const WORD_REVEAL_STAGGER = 30;
+/** Word boundary for indexing — any non-whitespace run. */
+const WORD_RE = /\S+/g;
+
+const countWords = (text: string): number => {
+  const matches = text.match(WORD_RE);
+  return matches ? matches.length : 0;
+};
+
+/** Signature of HTML-looking code the AI writes for charts and layouts. */
+const HTML_ISH = /<\s*(table|div|svg|style|section|article|html|canvas|figure|ul|chart)/i;
+
+interface WordCounter {
+  value: number;
+  /** Words first seen this render — staggers a burst without lagging steady streams. */
+  fresh: number;
+}
+
+/** Longest stagger a burst of new words can accumulate (10 × 30ms). */
+const WORD_REVEAL_MAX_BATCH = 10;
+
+/**
+ * Wrap the streaming tail words of plain string segments in animated spans.
+ * Lore tooltips, nested elements, and non-string children are left untouched
+ * so the block-level reveal handles them.
+ *
+ * Each word's animation delay is assigned once, when the word first arrives
+ * (kept in `delays`, which lives for the whole stream) — so a word animates
+ * relative to its own arrival, not its position in the tail window. New words
+ * appear immediately; only same-frame bursts get a small stagger.
+ */
+const wrapWords = (
+  node: React.ReactNode,
+  counter: WordCounter,
+  settled: number,
+  style: string | null,
+  delays: Map<number, number>,
+): React.ReactNode => {
+  if (!style || WORD_REVEAL_CAP <= 0) return node;
+  if (typeof node === 'string') {
+    if (!node.trim()) return node;
+    const out: React.ReactNode[] = [];
+    let cursor = 0;
+    let m: RegExpExecArray | null;
+    WORD_RE.lastIndex = 0;
+    while ((m = WORD_RE.exec(node))) {
+      const word = m[0];
+      const idx = counter.value++;
+      if (idx < settled) {
+        out.push(node.slice(cursor, m.index + word.length));
+      } else if (idx < settled + WORD_REVEAL_CAP) {
+        if (m.index > cursor) out.push(node.slice(cursor, m.index));
+        if (!delays.has(idx)) {
+          delays.set(idx, Math.min(counter.fresh++, WORD_REVEAL_MAX_BATCH) * WORD_REVEAL_STAGGER);
+        }
+        out.push(
+          <span
+            key={`w-${idx}`}
+            className={`word-reveal word-reveal-${style}`}
+            style={{ animationDelay: `${delays.get(idx)}ms` }}
+          >
+            {word}
+          </span>,
+        );
+      } else {
+        out.push(node.slice(cursor, m.index + word.length));
+      }
+      cursor = m.index + word.length;
+    }
+    if (cursor < node.length) out.push(node.slice(cursor));
+    return out.length === 1 ? out[0] : out;
+  }
+  if (Array.isArray(node)) {
+    return node.map(n => wrapWords(n, counter, settled, style, delays));
+  }
+  return node;
+};
+
+export interface MessageBlockProps {
+  msg: Message;
+  content: string;
+  isStreamingMsg: boolean;
+  isMsgZoomed: boolean;
+  avatar?: string;
+  /** Raw message content, used for the per-block "view original" toggle. */
+  rawContent?: string;
+  /** Whether this message has a Lens override applied. */
+  hasOverride?: boolean;
+  /** Number of reader notes anchored to this message. */
+  noteCount?: number;
+  /** Opens the scoped thread listing this message's notes. */
+  onOpenNotes?: (messageId: string) => void;
+  /** Pins a table/code visual from this message to the side dock. */
+  onPinContent?: (messageId: string, content: string, format: PinFormat) => void;
+  msgAnim: AnimationStyle;
+  /** Per-word streaming effect (independent of the block reveal). */
+  streamEffect: StreamEffect;
+  theme: Theme;
+  themeDef: ThemeDef;
+  minimalBubbles: boolean;
+  isAutofocusMode: boolean;
+  viewMode: ViewMode;
+  phoneDialogueOnly: boolean;
+  dialogueColor: string;
+  dialogueStyle: DialogueStyle;
+  dialogueAnimation: DialogueAnimation;
+  hideMetadata: boolean;
+  oocHandling: OocHandling;
+  autoFormat: boolean;
+  autoFormatRules: AutoFormatRule[];
+  statRules: StatRule[];
+  paragraphSpacing: boolean;
+  dialogueOwnLine: boolean;
+  smartTypography: boolean;
+  styleQuotes: boolean;
+  substituteNames: boolean;
+  characterName?: string;
+  userName?: string;
+  showImages: boolean;
+  swipeSelections: Record<string, number>;
+  activeRef?: React.RefObject<HTMLDivElement>;
+  onMessageClick: (id: string) => void;
+  onImageClick: (src: string) => void;
+  onShowDialogueTip: (e: React.MouseEvent<HTMLElement>, text: string) => void;
+  onHideDialogueTip: () => void;
+  markLore: (children: React.ReactNode) => React.ReactNode;
+  onSelectSwipe: (id: string, index: number) => void;
+}
+
+const MessageContent = React.memo(({
+  msg,
+  content,
+  isStreamingMsg,
+  msgAnim,
+  dialogueColor,
+  dialogueStyle,
+  dialogueAnimation,
+  hideMetadata,
+  oocHandling,
+  autoFormat,
+  autoFormatRules,
+  statRules,
+  paragraphSpacing,
+  dialogueOwnLine,
+  smartTypography,
+  styleQuotes,
+  substituteNames,
+  characterName,
+  userName,
+  showImages,
+  swipeSelections,
+  onImageClick,
+  onSelectSwipe,
+  markLore,
+  onPinContent,
+  settledCount,
+  wordRevealStyle,
+  wordDelays,
+}: Pick<MessageBlockProps, 'msg' | 'content' | 'isStreamingMsg' | 'msgAnim' | 'dialogueColor'
+  | 'dialogueStyle' | 'dialogueAnimation' | 'hideMetadata' | 'oocHandling' | 'autoFormat'
+  | 'autoFormatRules' | 'statRules' | 'paragraphSpacing' | 'dialogueOwnLine' | 'smartTypography'
+  | 'styleQuotes' | 'substituteNames' | 'characterName' | 'userName' | 'showImages'
+  | 'swipeSelections' | 'onImageClick' | 'onSelectSwipe' | 'markLore' | 'onPinContent'> & {
+    settledCount: number;
+    wordRevealStyle: string | null;
+    wordDelays: Map<number, number>;
+  }) => {
+  const { entries: statEntries, prose: statProse } = buildStatPanel(content, statRules);
+  const processedText = isStreamingMsg
+    ? balanceEmphasis(truncateToWord(statProse))
+    : processText(statProse, {
+        // Hidden SillyTavern messages (/hide, narrator, system notes) are
+        // meant to be readable in the reader; stripping their metadata tags
+        // can erase them entirely, so preserve their full text.
+        hideMetadata: hideMetadata && !msg.hidden,
+        oocHandling,
+        autoFormat,
+        autoFormatRules,
+        paragraphSpacing,
+        dialogueOwnLine,
+        smartTypography,
+        styleQuotes,
+        substituteNames,
+        characterName,
+        userName,
+        role: msg.role,
+      }).processedText;
+
+  const counter: WordCounter = { value: 0, fresh: 0 };
+
+  return (
+    <div
+      className={cn(
+        'markdown-body max-w-none',
+        msgAnim === 'smooth' && isStreamingMsg && 'animate-smooth-reveal',
+        msgAnim === 'magic' && isStreamingMsg && 'animate-magic-reveal',
+        msgAnim === 'fade' && isStreamingMsg && 'animate-fade-in',
+        msgAnim === 'blur' && isStreamingMsg && 'animate-blur-reveal',
+        msgAnim === 'ink' && isStreamingMsg && 'animate-ink-reveal',
+        msgAnim === 'glitch' && isStreamingMsg && 'animate-glitch-reveal',
+        msgAnim === 'rise' && isStreamingMsg && 'animate-rise-reveal',
+      )}
+    >
+      {statEntries.length > 0 && (
+        <StatPanel entries={statEntries} />
+      )}
+      <ReactMarkdown
+        remarkPlugins={[remarkGfm]}
+        components={{
+          p: ({ node: _node, children, ...props }) => (
+            <p {...props}>
+              {wrapWords(markLore(children), counter, settledCount, wordRevealStyle, wordDelays)}
+            </p>
+          ),
+          li: ({ node: _node, children, ...props }) => (
+            <li {...props}>
+              {wrapWords(markLore(children), counter, settledCount, wordRevealStyle, wordDelays)}
+            </li>
+          ),
+          em: ({ node: _node, ...props }) => {
+            const dialogue = isDialogueText(textOf(props.children));
+            if (!dialogue) {
+              return (
+                <em className="italic opacity-90" {...props}>
+                  {wrapWords(markLore(props.children), counter, settledCount, wordRevealStyle, wordDelays)}
+                </em>
+              );
+            }
+            const animate = !isStreamingMsg && dialogueAnimation !== 'none';
+            return (
+              <em
+                className={cn(
+                  dialogueColor,
+                  dialogueStyle === 'italic' || dialogueStyle === 'bold-italic'
+                    ? 'italic' : 'not-italic',
+                  dialogueStyle === 'bold' || dialogueStyle === 'bold-italic'
+                    ? 'font-bold' : 'font-medium',
+                  animate && dialogueAnimation === 'zoom' && 'animate-dialogue-zoom inline-block',
+                  animate && dialogueAnimation === 'pulse' && 'animate-dialogue-pulse inline-block',
+                  animate && dialogueAnimation === 'wave' && 'animate-dialogue-wave inline-block',
+                  animate && dialogueAnimation === 'glow' && 'animate-dialogue-glow',
+                  animate && dialogueAnimation === 'rise' && 'animate-dialogue-rise',
+                )}
+                {...props}
+              />
+            );
+          },
+          strong: ({ node: _node, ...props }) => (
+            <strong className="font-bold text-amber-600 dark:text-amber-400" {...props}>
+              {wrapWords(props.children, counter, settledCount, wordRevealStyle, wordDelays)}
+            </strong>
+          ),
+          // AI-written tables get a hover pin — captured verbatim from the
+          // processed source so the dock re-renders exactly what's shown.
+          table: ({ node, ...props }) => {
+            const pos = (node as any)?.position;
+            const src = pos?.start?.offset != null && pos?.end?.offset != null
+              ? processedText.slice(pos.start.offset, pos.end.offset)
+              : '';
+            return (
+              <div className="relative group/pin overflow-x-auto">
+                {onPinContent && !isStreamingMsg && src && (
+                  <button
+                    onClick={(e) => { e.stopPropagation(); onPinContent(msg.id, src, 'markdown'); }}
+                    title="Pin this table to the side"
+                    className="absolute top-1 right-1 z-10 p-1.5 rounded-lg bg-surface/95 border border-app-border shadow-sm opacity-0 group-hover/pin:opacity-100 transition-opacity"
+                  >
+                    <PinIcon size={12} />
+                  </button>
+                )}
+                <table {...props} />
+              </div>
+            );
+          },
+          // Code blocks: HTML-looking ones pin as live visuals, the rest as code.
+          pre: ({ node: _node, children, ...props }) => {
+            const text = textOf(children);
+            const isHtml = HTML_ISH.test(text);
+            return (
+              <div className="relative group/pin">
+                {onPinContent && !isStreamingMsg && text.trim() && (
+                  <button
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      onPinContent(
+                        msg.id,
+                        isHtml ? text : `\`\`\`\n${text}\n\`\`\``,
+                        isHtml ? 'html' : 'markdown',
+                      );
+                    }}
+                    title={isHtml ? 'Pin as a live visual' : 'Pin this block to the side'}
+                    className="absolute top-1.5 right-1.5 z-10 p-1.5 rounded-lg bg-surface/95 border border-app-border shadow-sm opacity-0 group-hover/pin:opacity-100 transition-opacity"
+                  >
+                    <PinIcon size={12} />
+                  </button>
+                )}
+                <pre {...props}>{children}</pre>
+              </div>
+            );
+          },
+          img: ({ node: _node, src, alt }) => {
+            if (!showImages || !src) return null;
+            return (
+              <img
+                src={src as string}
+                alt={(alt as string) || ''}
+                className="reader-img"
+                loading="lazy"
+                referrerPolicy="no-referrer"
+                onClick={(e) => { e.stopPropagation(); onImageClick(src as string); }}
+              />
+            );
+          },
+        }}
+      >
+        {processedText}
+      </ReactMarkdown>
+      {showImages && msg.images && msg.images.length > 0 && (
+        <div className="reader-img-grid">
+          {msg.images.map((src, i) => (
+            <img
+              key={i}
+              src={src}
+              alt=""
+              className="reader-img"
+              loading="lazy"
+              referrerPolicy="no-referrer"
+              onClick={(e) => { e.stopPropagation(); onImageClick(src); }}
+            />
+          ))}
+        </div>
+      )}
+      {msg.swipes && msg.swipes.length > 1 && (() => {
+        const len = msg.swipes.length;
+        const idx = swipeSelections[msg.id] ?? Math.max(0, msg.swipes.indexOf(msg.content));
+        return (
+          <div
+            className="flex items-center gap-2 mt-3 text-xs opacity-70"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <button
+              onClick={() => onSelectSwipe(msg.id, (idx - 1 + len) % len)}
+              className="w-6 h-6 rounded-full hover:bg-app-text/10 flex items-center justify-center"
+              title="Previous version"
+            >
+              <ChevronLeft size={14} />
+            </button>
+            <span className="font-mono tabular-nums">{idx + 1}/{len}</span>
+            <button
+              onClick={() => onSelectSwipe(msg.id, (idx + 1) % len)}
+              className="w-6 h-6 rounded-full hover:bg-app-text/10 flex items-center justify-center"
+              title="Next version"
+            >
+              <ChevronRight size={14} />
+            </button>
+            <span className="uppercase tracking-wider text-[10px] opacity-70">what-ifs</span>
+          </div>
+        );
+      })()}
+      {isStreamingMsg && (
+        msgAnim === 'decrypt' ? (
+          <DecryptCaret />
+        ) : (
+          <span
+            className={cn(
+              'inline-block w-2 h-4 ml-1 align-middle animate-pulse',
+              msgAnim === 'magic'
+                ? 'bg-purple-500 shadow-[0_0_8px_2px_rgba(168,85,247,0.8)]'
+                : 'bg-current',
+            )}
+          />
+        )
+      )}
+    </div>
+  );
+}, (prev, next) => {
+  return prev.msg === next.msg
+    && prev.content === next.content
+    && prev.isStreamingMsg === next.isStreamingMsg
+    && prev.msgAnim === next.msgAnim
+    && prev.dialogueColor === next.dialogueColor
+    && prev.dialogueStyle === next.dialogueStyle
+    && prev.dialogueAnimation === next.dialogueAnimation
+    && prev.hideMetadata === next.hideMetadata
+    && prev.oocHandling === next.oocHandling
+    && prev.autoFormat === next.autoFormat
+    && prev.autoFormatRules === next.autoFormatRules
+    && prev.statRules === next.statRules
+    && prev.paragraphSpacing === next.paragraphSpacing
+    && prev.dialogueOwnLine === next.dialogueOwnLine
+    && prev.smartTypography === next.smartTypography
+    && prev.styleQuotes === next.styleQuotes
+    && prev.substituteNames === next.substituteNames
+    && prev.characterName === next.characterName
+    && prev.userName === next.userName
+    && prev.showImages === next.showImages
+    && prev.swipeSelections === next.swipeSelections
+    && prev.markLore === next.markLore
+    && prev.onPinContent === next.onPinContent
+    && prev.settledCount === next.settledCount
+    && prev.wordRevealStyle === next.wordRevealStyle
+    && prev.wordDelays === next.wordDelays;
+});
+
+export const MessageBlock = React.memo((props: MessageBlockProps) => {
+  const {
+    msg,
+    content,
+    isStreamingMsg,
+    isMsgZoomed,
+    avatar,
+    rawContent,
+    hasOverride,
+    noteCount = 0,
+    onOpenNotes,
+    onPinContent,
+    msgAnim,
+    streamEffect,
+    theme,
+    themeDef,
+    minimalBubbles,
+    isAutofocusMode,
+    viewMode,
+    phoneDialogueOnly,
+    activeRef,
+    onMessageClick,
+    onShowDialogueTip,
+    onHideDialogueTip,
+  } = props;
+
+  const isUser = msg.role === 'user';
+  const [showOriginal, setShowOriginal] = useState(false);
+  const displayContent = showOriginal && rawContent != null ? rawContent : content;
+
+  // Streaming word-reveal: only the last WORD_REVEAL_CAP words animate.
+  // The effect is its own setting — the block reveal (msgAnim) stays untouched.
+  const totalWords = isStreamingMsg ? countWords(displayContent) : 0;
+  const settledCount = isStreamingMsg ? Math.max(0, totalWords - WORD_REVEAL_CAP) : 0;
+  const wordRevealStyle = isStreamingMsg && streamEffect !== 'none' ? streamEffect : null;
+
+  // Per-word animation delays, assigned when a word first arrives and kept
+  // for the whole stream so re-renders never reschedule a word's reveal.
+  const wordDelaysRef = useRef<{ key: string; map: Map<number, number> }>({ key: '', map: new Map() });
+  const delayKey = isStreamingMsg ? msg.id : '';
+  if (wordDelaysRef.current.key !== delayKey) {
+    wordDelaysRef.current = { key: delayKey, map: new Map() };
+  }
+  const wordDelays = wordDelaysRef.current.map;
+
+  // Phone "dialogue only" — show just the spoken lines as received-text
+  // bubbles; each quote becomes its own bubble, narration is hidden.
+  // Hidden SillyTavern messages (/hide, narrator, system notes) are still
+  // part of the story, so they render as a single bubble even without quotes.
+  if (theme === 'phone' && phoneDialogueOnly && viewMode !== 'storybook') {
+    let segments = extractDialogueSegments(displayContent);
+    if (!segments.length && !msg.hidden) return null;
+    if (!segments.length && msg.hidden) segments = [{ quote: displayContent, context: '' }];
+    return (
+      <div
+        key={msg.id}
+        data-msg-id={msg.id}
+        ref={isStreamingMsg ? activeRef : undefined}
+        onClick={() => onMessageClick(msg.id)}
+        data-streaming={isStreamingMsg}
+        data-zoomed={isMsgZoomed}
+        className={cn(
+          'flex w-full mb-4 cursor-pointer group transition-all duration-500 gap-3 message-block',
+          isUser ? 'justify-end flex-row-reverse' : 'justify-start',
+          isAutofocusMode && !isStreamingMsg && 'opacity-25 blur-[1px]',
+        )}
+      >
+        {!minimalBubbles && <Avatar name={msg.name} src={avatar} />}
+        <div className="flex flex-col gap-1.5 max-w-[78%]">
+          {segments.map((seg, i) => {
+            const hasContext = seg.context && seg.context !== seg.quote;
+            return (
+              <div
+                key={i}
+                onMouseEnter={hasContext ? (e) => onShowDialogueTip(e, seg.context) : undefined}
+                onMouseLeave={onHideDialogueTip}
+                className={cn(
+                  'px-4 py-2 rounded-2xl shadow-sm text-[0.95em] leading-snug',
+                  hasContext && 'cursor-help',
+                  isUser
+                    ? 'bg-bubble-user text-bubble-user-text rounded-br-md self-end'
+                    : 'bg-bubble-ai border border-app-border/60 rounded-bl-md self-start',
+                )}
+              >
+                {seg.quote}
+              </div>
+            );
+          })}
+          {isStreamingMsg && (
+            <span className="inline-block w-2 h-3 bg-current animate-pulse rounded-full opacity-60" />
+          )}
+        </div>
+      </div>
+    );
+  }
+
+  if (viewMode === 'storybook') {
+    return (
+      <div
+        key={msg.id}
+        data-msg-id={msg.id}
+        data-streaming={isStreamingMsg}
+        data-zoomed={isMsgZoomed}
+        ref={isStreamingMsg ? activeRef : undefined}
+        onClick={() => onMessageClick(msg.id)}
+        title={isStreamingMsg ? 'Click to play/pause' : 'Click to replay from here'}
+        className={cn(
+          'mb-8 cursor-pointer hover:bg-app-text/5 transition-all duration-500 p-4 rounded-xl message-block group',
+          isStreamingMsg ? 'opacity-100' : 'opacity-90',
+          isUser && 'italic opacity-80 border-l-2 border-app-border pl-4 ml-2',
+          isMsgZoomed && 'scale-105 transform origin-left shadow-lg bg-app-text/5 my-12',
+          isAutofocusMode && !isStreamingMsg && 'opacity-25 blur-[1px]',
+        )}
+      >
+        {onPinContent && !isStreamingMsg && (
+          <button
+            onClick={(e) => { e.stopPropagation(); onPinContent(msg.id, displayContent, 'markdown'); }}
+            title="Pin this whole message to the side dock"
+            className="float-right ml-2 mt-1 p-1 rounded-full text-app-text/50 hover:text-accent hover:bg-accent/10 opacity-0 group-hover:opacity-100 transition-opacity"
+          >
+            <PinIcon size={12} />
+          </button>
+        )}
+        {noteCount > 0 && !isStreamingMsg && onOpenNotes && (
+          <button
+            onClick={(e) => { e.stopPropagation(); onOpenNotes(msg.id); }}
+            title={`${noteCount} note${noteCount === 1 ? '' : 's'} on this passage`}
+            className="float-right ml-3 mt-1 inline-flex items-center gap-1 px-1.5 py-0.5 rounded-full text-[10px] text-app-text/50 hover:text-accent hover:bg-accent/10 transition-colors"
+          >
+            <MessageSquare size={11} />
+            {noteCount}
+          </button>
+        )}
+        <MessageContent {...props} content={displayContent} settledCount={settledCount} wordRevealStyle={wordRevealStyle} wordDelays={wordDelays} />
+      </div>
+    );
+  }
+
+  // Chat mode
+  return (
+    <div
+      key={msg.id}
+      data-msg-id={msg.id}
+      data-streaming={isStreamingMsg}
+      data-zoomed={isMsgZoomed}
+      ref={isStreamingMsg ? activeRef : undefined}
+      onClick={() => onMessageClick(msg.id)}
+      title={isStreamingMsg ? 'Click to play/pause' : 'Click to replay from here'}
+      className={cn(
+        'flex w-full mb-6 cursor-pointer group transition-all duration-500 gap-3 message-block',
+        isUser ? 'justify-end flex-row-reverse' : 'justify-start',
+        isMsgZoomed && cn('scale-105 transform my-8', isUser ? 'origin-right' : 'origin-left'),
+        isAutofocusMode && !isStreamingMsg && 'opacity-25 blur-[1px]',
+      )}
+    >
+      {!minimalBubbles && <Avatar name={msg.name} src={avatar} />}
+      <div
+        className={cn(
+          'reader-bubble max-w-[80%] px-5 py-4 relative transition-all',
+          minimalBubbles
+            ? 'rounded-none border-b border-app-border shadow-none max-w-full w-full'
+            : cn(
+                'rounded-2xl shadow-md group-hover:ring-2 ring-accent/40',
+                isUser
+                  ? 'bg-bubble-user text-bubble-user-text rounded-br-sm'
+                  : 'bg-bubble-ai rounded-bl-sm border border-app-border/60',
+              ),
+          isMsgZoomed && 'ring-2 ring-yellow-500/50 shadow-xl',
+        )}
+      >
+        <div className="reader-bubble-name text-xs font-bold mb-2 opacity-70 uppercase tracking-wider flex items-center gap-2">
+          {msg.name}
+          {msg.hidden && (
+            <span className="normal-case tracking-normal font-medium text-[10px] px-1.5 py-0.5 rounded bg-app-text/10 opacity-80">
+              hidden
+            </span>
+          )}
+          {(noteCount > 0 || hasOverride || onPinContent) && !isStreamingMsg && (
+            <span className="ml-auto flex items-center gap-0.5">
+              {onPinContent && (
+                <button
+                  onClick={(e) => { e.stopPropagation(); onPinContent(msg.id, displayContent, 'markdown'); }}
+                  title="Pin this whole message to the side dock"
+                  className="p-1 rounded-full text-app-text/50 hover:text-accent hover:bg-accent/10 opacity-0 group-hover:opacity-100 transition-opacity"
+                >
+                  <PinIcon size={12} />
+                </button>
+              )}
+              {noteCount > 0 && onOpenNotes && (
+                <button
+                  onClick={(e) => { e.stopPropagation(); onOpenNotes(msg.id); }}
+                  title={`${noteCount} note${noteCount === 1 ? '' : 's'} on this passage`}
+                  className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-full normal-case tracking-normal font-medium text-[10px] text-app-text/50 hover:text-accent hover:bg-accent/10 transition-colors"
+                >
+                  <MessageSquare size={11} />
+                  {noteCount}
+                </button>
+              )}
+              {hasOverride && (
+                <button
+                  onClick={(e) => { e.stopPropagation(); setShowOriginal(o => !o); }}
+                  title={showOriginal ? 'Show edited version' : 'View original'}
+                  className={cn(
+                    'p-1 rounded-full transition-colors',
+                    showOriginal ? 'text-amber-500 bg-amber-500/10' : 'text-app-text/40 hover:text-app-text/70 hover:bg-app-text/10',
+                  )}
+                >
+                  <Pencil size={12} />
+                </button>
+              )}
+            </span>
+          )}
+        </div>
+        <MessageContent {...props} content={displayContent} settledCount={settledCount} wordRevealStyle={wordRevealStyle} wordDelays={wordDelays} />
+      </div>
+    </div>
+  );
+}, (prev, next) => {
+  return prev.msg.id === next.msg.id
+    && prev.content === next.content
+    && prev.rawContent === next.rawContent
+    && prev.hasOverride === next.hasOverride
+    && prev.noteCount === next.noteCount
+    && prev.onOpenNotes === next.onOpenNotes
+    && prev.onPinContent === next.onPinContent
+    && prev.streamEffect === next.streamEffect
+    && prev.isStreamingMsg === next.isStreamingMsg
+    && prev.isMsgZoomed === next.isMsgZoomed
+    && prev.avatar === next.avatar
+    && prev.msgAnim === next.msgAnim
+    && prev.theme === next.theme
+    && prev.themeDef === next.themeDef
+    && prev.minimalBubbles === next.minimalBubbles
+    && prev.isAutofocusMode === next.isAutofocusMode
+    && prev.viewMode === next.viewMode
+    && prev.phoneDialogueOnly === next.phoneDialogueOnly
+    && prev.activeRef === next.activeRef
+    && prev.onMessageClick === next.onMessageClick
+    && prev.onImageClick === next.onImageClick
+    && prev.onShowDialogueTip === next.onShowDialogueTip
+    && prev.onHideDialogueTip === next.onHideDialogueTip
+    && prev.markLore === next.markLore
+    && prev.onSelectSwipe === next.onSelectSwipe
+    && prev.swipeSelections === next.swipeSelections
+    && prev.dialogueColor === next.dialogueColor
+    && prev.dialogueStyle === next.dialogueStyle
+    && prev.dialogueAnimation === next.dialogueAnimation
+    && prev.hideMetadata === next.hideMetadata
+    && prev.oocHandling === next.oocHandling
+    && prev.autoFormat === next.autoFormat
+    && prev.autoFormatRules === next.autoFormatRules
+    && prev.statRules === next.statRules
+    && prev.paragraphSpacing === next.paragraphSpacing
+    && prev.dialogueOwnLine === next.dialogueOwnLine
+    && prev.smartTypography === next.smartTypography
+    && prev.styleQuotes === next.styleQuotes
+    && prev.substituteNames === next.substituteNames
+    && prev.characterName === next.characterName
+    && prev.userName === next.userName
+    && prev.showImages === next.showImages;
+});

@@ -1,6 +1,8 @@
 import { useEffect } from 'react';
 import { useAppStore } from '../store';
+import { useAuraV2Store } from '../stores/useAuraV2Store';
 import { processText } from '../utils/textProcessor';
+import { resolveContent } from '../utils/lens';
 
 /** Characters revealed per second for a 1-100 speed setting. */
 export const charsPerSecond = (speed: number) => 8 + speed * 2.2;
@@ -44,14 +46,22 @@ export const useStreamer = () => {
       const s = useAppStore.getState();
       const msg = s.streamingMessage;
       if (!msg) return '';
+      const v2 = useAuraV2Store.getState();
+      const storyId = s.currentStory?.id;
+      const content = resolveContent(
+        msg,
+        storyId ? v2.overridesByStory[storyId] : undefined,
+        !!storyId && !!v2.lensOnByStory[storyId],
+      );
       const key = [
-        msg.id, s.hideMetadata, s.autoFormat, s.styleQuotes, s.substituteNames,
-        s.paragraphSpacing, s.dialogueOwnLine, s.smartTypography,
+        msg.id, content, s.hideMetadata, s.autoFormat, s.styleQuotes, s.substituteNames,
+        s.paragraphSpacing, s.dialogueOwnLine, s.smartTypography, s.oocHandling,
         JSON.stringify(s.autoFormatRules),
       ].join('|');
       if (cachedFullText === null || key !== cachedKey) {
-        cachedFullText = processText(msg.content, {
+        cachedFullText = processText(content, {
           hideMetadata: s.hideMetadata,
+          oocHandling: s.oocHandling,
           autoFormat: s.autoFormat,
           autoFormatRules: s.autoFormatRules,
           paragraphSpacing: s.paragraphSpacing,

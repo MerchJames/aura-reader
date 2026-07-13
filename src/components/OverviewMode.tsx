@@ -136,7 +136,7 @@ export const OverviewMode = () => {
   };
 
   return (
-    <div className="flex-1 overflow-y-auto pb-40 px-4 pt-8 max-w-4xl mx-auto w-full">
+    <div className="flex-1 min-h-0 overflow-y-auto pb-40 px-4 pt-8 max-w-4xl mx-auto w-full">
       <h2 className="text-2xl font-serif font-bold mb-2">Story Overview</h2>
       <p className="text-muted mb-8 text-sm">
         Drag to reorder chains. Star segments to give them custom animation and playback speed.
