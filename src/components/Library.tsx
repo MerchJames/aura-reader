@@ -1,5 +1,5 @@
 import React, { useRef, useState } from 'react';
-import { BookOpen, FileJson, Image, MessageSquare, Settings, Trash2, Upload, X } from 'lucide-react';
+import { BookOpen, FileJson, FileText, Image, MessageSquare, Settings, Trash2, Upload, X } from 'lucide-react';
 import { useAppStore } from '../store';
 import { StoryFormat, StoryMeta } from '../types';
 import { ImportModal } from './ImportModal';
@@ -9,12 +9,14 @@ const FORMAT_LABEL: Record<StoryFormat, string> = {
   sillytavern: 'SillyTavern',
   kobold: 'Kobold',
   card: 'Character Card',
+  document: 'Document',
 };
 
 const FORMAT_ICON: Record<StoryFormat, React.ReactNode> = {
   sillytavern: <MessageSquare size={13} />,
   kobold: <FileJson size={13} />,
   card: <Image size={13} />,
+  document: <FileText size={13} />,
 };
 
 const COVER_GRADIENTS = [
@@ -137,7 +139,7 @@ export const Library = () => {
 
   const handleFiles = async (files: File[]) => {
     if (files.length === 0) return;
-    const stories = files.filter(f => /\.(jsonl?|json)$/i.test(f.name));
+    const stories = files.filter(f => /\.(jsonl?|json|txt|md|markdown|docx)$/i.test(f.name));
     const cards = files.filter(f => /\.png$/i.test(f.name));
     // Story files get the import modal (attach cards up front); a pure
     // card drop keeps the classic instant flow (card becomes a story).
@@ -163,7 +165,7 @@ export const Library = () => {
         type="file"
         ref={fileInputRef}
         className="hidden"
-        accept=".jsonl,.json,.png"
+        accept=".jsonl,.json,.png,.txt,.md,.markdown,.docx"
         multiple
         onChange={(e) => {
           void handleFiles(Array.from(e.target.files ?? []));
@@ -227,7 +229,8 @@ export const Library = () => {
             <p className="text-lg font-bold">Your library is empty</p>
             <p className="text-sm text-muted mt-2">
               Drop files here or click to import — SillyTavern chats (.jsonl),
-              Kobold saves (.json), or character cards (.png).
+              Kobold saves (.json), documents (.txt, .md, .docx), or character
+              cards (.png).
             </p>
           </div>
         ) : (

@@ -31,7 +31,8 @@ const buildChains = (
 
   messages.forEach(msg => {
     // Kobold saves are continuous prose: every action is its own "page".
-    if (!current || msg.role === 'user' || format === 'kobold') {
+    // Documents open a new chain (page) at each chapter break (startsChain).
+    if (!current || msg.role === 'user' || format === 'kobold' || msg.startsChain) {
       startChain(msg);
     } else {
       current.messages.push(msg);
@@ -105,7 +106,7 @@ const CONFIG_KEYS: (keyof AppConfig)[] = [
   'styleQuotes', 'substituteNames', 'dialogueColor', 'dialogueStyle', 'dialogueAnimation',
   'contentWidth', 'oocHandling', 'phoneDialogueOnly', 'themeEffects',
   'revealMode', 'messagePause', 'pauseAtPageEnd', 'ttsEnabled', 'ttsVoiceURI', 'ttsRate',
-  'ttsPitch', 'ttsFollowSpeed', 'aiBaseUrl', 'aiApiKey', 'aiModel',
+  'ttsPitch', 'ttsFollowSpeed', 'aiBaseUrl', 'aiApiKey', 'aiModel', 'aiAdvanced',
   'ttsEngine', 'kokoroBaseUrl', 'kokoroApiKey', 'kokoroVoice', 'kokoroUserVoice', 'ttsVoiceByCharacter',
   'ambientEnabled', 'ambientVolume', 'ambientByTheme',
 ];
@@ -219,6 +220,21 @@ export const useAppStore = create<AppState>()(
         aiBaseUrl: '',
         aiApiKey: '',
         aiModel: '',
+        aiAdvanced: {
+          streaming: true,
+          systemPrompt: '',
+          contextTemplate: '',
+          contextSize: 0,
+          maxTokens: 0,
+          extendedSamplers: false,
+          temperature: null,
+          topP: null,
+          topK: null,
+          minP: null,
+          repetitionPenalty: null,
+          frequencyPenalty: null,
+          presencePenalty: null,
+        },
 
         /* ----- library ----- */
         screen: 'library',
@@ -251,6 +267,7 @@ export const useAppStore = create<AppState>()(
         awaitingAdvance: false,
         swipeSelections: {},
         aiOpen: false,
+        lensEditTarget: null,
 
         /* ----- library actions ----- */
 
@@ -338,9 +355,10 @@ export const useAppStore = create<AppState>()(
 
           const { autoStream, layoutMode, viewMode } = get();
           const chains = buildChains(story.messages, story.format, story.stars);
+          const proseFormat = story.format === 'kobold' || story.format === 'document';
           const readingView = viewMode === 'storybook' || viewMode === 'chat'
             ? viewMode
-            : (story.format === 'kobold' ? 'storybook' : 'chat');
+            : (proseFormat ? 'storybook' : 'chat');
 
           const base = {
             currentStory: story,
@@ -806,6 +824,8 @@ export const useAppStore = create<AppState>()(
         setAiApiKey: (aiApiKey) => set({ aiApiKey }),
         setAiModel: (aiModel) => set({ aiModel }),
         setAiOpen: (aiOpen) => set({ aiOpen }),
+        setLensEditTarget: (lensEditTarget) => set({ lensEditTarget, ...(lensEditTarget ? { aiOpen: true } : {}) }),
+        setAiAdvanced: (patch) => set({ aiAdvanced: { ...get().aiAdvanced, ...patch } }),
 
         selectSwipe: (messageId, index) => {
           const { chains } = get();

@@ -338,7 +338,7 @@ export const AutoFormatModal = ({ onClose }: { onClose: () => void }) => {
           const text = (await chatCompletion(app.aiBaseUrl, app.aiApiKey, app.aiModel, [
             { role: 'system', content: system },
             { role: 'user', content: m.content },
-          ], signal)).trim();
+          ], {}, signal)).trim();
           // The prompt forbids removing content — a reply that's empty or
           // dramatically shorter means the model misbehaved; keep the original.
           const destructive = !text

@@ -4,19 +4,37 @@ import remarkGfm from 'remark-gfm';
 import remarkMath from 'remark-math';
 import rehypeKatex from 'rehype-katex';
 import 'katex/dist/katex.min.css';
-import { Bot, Loader2, RefreshCw, Send, Sparkles, X } from 'lucide-react';
+import {
+  Bot, Check, ChevronLeft, ChevronRight, Combine, Loader2, Pencil, Plus, RefreshCw,
+  Send, SlidersHorizontal, Sparkles, Square, Trash2, Wand2, X,
+} from 'lucide-react';
 import { useAppStore } from '../store';
-import { candidateBases, chatCompletion, ChatMsg, listModels } from '../utils/aiClient';
+import { useShallow } from 'zustand/react/shallow';
+import {
+  candidateBases, chatCompletion, chatCompletionStream, ChatMsg, isLocalBase,
+  listModels, samplerParamsFrom,
+} from '../utils/aiClient';
 import { cardToPromptBlock, pinsToPromptBlock, sheetsToPromptBlock } from '../utils/cardContext';
 import { cn } from '../utils/cn';
 import { useAuraV2Store } from '../stores/useAuraV2Store';
+import { buildZoneBody, flatWithIndex, zoneSummary } from '../utils/contextZone';
+import { resolveContent } from '../utils/lens';
+import { buildCowritePayload } from '../utils/cowrite';
+import { ContextZoneBuilder } from './ContextZoneBuilder';
+import { CowritePanel } from './CowritePanel';
+import { AiAdvancedConfig, ChatTurn, CowriteRunSpec, Message } from '../types';
 
-type Scope = 'page' | 'here' | 'all' | 'swipes';
+type Scope = 'page' | 'here' | 'all' | 'swipes' | 'zones';
+
+/** Stable empty index so the lazy `flat` memo doesn't churn when Lens is idle. */
+const NO_FLAT: ReturnType<typeof flatWithIndex> = [];
 
 interface ContextOpts {
   scope: Scope;
   includeHighlights: boolean;
   focusCharacter: string;
+  /** Active Context Zone id (only used when scope === 'zones'). */
+  zoneId?: string;
 }
 
 /** Gather the transcript for the chosen scope, resolving the live streaming text. */
@@ -54,22 +72,47 @@ const MAX_CHARS = 1_000_000;
 /** Build the system prompt for the assistant from the reader's chosen options. */
 const buildContext = (opts: ContextOpts): string => {
   const s = useAppStore.getState();
-  const { currentStory, chains } = s;
-  const flat = collectTranscript(opts.scope);
-
-  let body = flat.map(m => `${m.name}: ${m.content}`).join('\n\n');
-  // Send the full scope. Only trim if it exceeds the safety ceiling, keeping
-  // the most recent text.
-  if (body.length > MAX_CHARS) body = `…(earliest text omitted to fit)…\n\n${body.slice(body.length - MAX_CHARS)}`;
-
+  const { currentStory, chains, streamingMessage, streamedText } = s;
   const total = chains.reduce((n, c) => n + c.messages.length, 0);
-  const branchChar = flat[0]?.name?.split(' — ')[0] ?? 'a character';
-  const scopeLine =
-    opts.scope === 'all' ? 'You can see the ENTIRE story.'
-    : opts.scope === 'page' ? 'You can see only the CURRENT page.'
-    : opts.scope === 'swipes'
-      ? `You are comparing ALL ${flat.length} alternate version${flat.length === 1 ? '' : 's'} (swipes) of a SINGLE message from "${branchChar}". Each is labeled "version N" below. Help the reader compare them, summarize across them, or judge which reads best — no wider story is provided.`
-    : `You can see the story up to the reader's position (message ${flat.length} of ${total}). Do not invent or spoil events beyond it.`;
+  const resolve = (m: { id: string; content: string }) =>
+    m.id === streamingMessage?.id ? streamedText : m.content;
+
+  let body: string;
+  let scopeLine: string;
+
+  if (opts.scope === 'zones') {
+    const zone = opts.zoneId
+      ? useAuraV2Store.getState().zonesByStory[currentStory?.id ?? '']?.find(z => z.id === opts.zoneId)
+      : undefined;
+    if (!zone) {
+      body = '(No context zone selected.)';
+      scopeLine = 'The reader has not selected a context zone yet.';
+    } else {
+      const built = buildZoneBody(zone, chains, resolve);
+      body = built.empty ? '(The selected context zone is empty.)' : built.body;
+      scopeLine = built.empty
+        ? `The reader's context zone "${zone.name}" is currently empty.`
+        : `You are given a reader-curated CONTEXT ZONE named "${zone.name}" — a hand-picked selection of ${built.messageCount} message${built.messageCount === 1 ? '' : 's'}${built.branchlineCount ? ` plus the full alternate versions (branchlines) of ${built.branchlineCount} message${built.branchlineCount === 1 ? '' : 's'}` : ''}. Work only from what it contains. The selection may be non-contiguous, so do not assume anything about gaps between the passages shown.`;
+    }
+  } else {
+    const flat = collectTranscript(opts.scope);
+    body = flat.map(m => `${m.name}: ${m.content}`).join('\n\n');
+    const branchChar = flat[0]?.name?.split(' — ')[0] ?? 'a character';
+    scopeLine =
+      opts.scope === 'all' ? 'You can see the ENTIRE story.'
+      : opts.scope === 'page' ? 'You can see only the CURRENT page.'
+      : opts.scope === 'swipes'
+        ? `You are comparing ALL ${flat.length} alternate version${flat.length === 1 ? '' : 's'} (swipes) of a SINGLE message from "${branchChar}". Each is labeled "version N" below. Help the reader compare them, summarize across them, or judge which reads best — no wider story is provided.`
+      : `You can see the story up to the reader's position (message ${flat.length} of ${total}). Do not invent or spoil events beyond it.`;
+  }
+
+  // Trim the transcript to fit. The reader's context-size budget (if set) wins,
+  // minus a rough reserve for the model's own reply; otherwise the safety ceiling.
+  const adv = s.aiAdvanced;
+  const cap = adv.contextSize > 0
+    ? Math.max(2000, adv.contextSize * 4 - Math.max(0, adv.maxTokens) * 4)
+    : MAX_CHARS;
+  if (body.length > cap) body = `…(earliest text omitted to fit)…\n\n${body.slice(body.length - cap)}`;
 
   // Reader's highlights + notes.
   const highlights = currentStory?.highlights ?? [];
@@ -102,7 +145,7 @@ const buildContext = (opts: ContextOpts): string => {
   // gives the assistant ground truth beyond the transcript itself.
   const cardBlock = cardToPromptBlock(currentStory?.card);
 
-  return [
+  const assembled = [
     `You are a reading assistant embedded in "Aura Reader", helping the reader with a story / roleplay chat titled "${currentStory?.title ?? 'Untitled'}".`,
     currentStory?.characterName ? `Main character: ${currentStory.characterName}.` : '',
     currentStory?.userName ? `The reader's own persona in this story is "${currentStory.userName}".` : '',
@@ -117,6 +160,72 @@ const buildContext = (opts: ContextOpts): string => {
     sheetBlock,
     pinBlock,
   ].filter(Boolean).join('\n');
+
+  // Advanced overrides: an optional persona/system prompt and a custom context
+  // template. When a template with {{content}} is supplied it wraps everything;
+  // otherwise the reader's system prompt is simply prepended.
+  const sys = adv.systemPrompt.trim();
+  const tpl = adv.contextTemplate.trim();
+  if (tpl && /\{\{\s*content\s*\}\}/.test(tpl)) {
+    return tpl
+      .replace(/\{\{\s*content\s*\}\}/g, assembled)
+      .replace(/\{\{\s*system\s*\}\}/g, sys);
+  }
+  return sys ? `${sys}\n\n${assembled}` : assembled;
+};
+
+/**
+ * Cheap character-count estimate for the size readout. buildContext allocates
+ * and joins the full prompt (transcript up to ~1M chars + pinned visuals up to
+ * ~200k) — far too heavy to run on mount and every keystroke just to show a
+ * token count. This sums lengths instead: no multi-MB string is ever built, so
+ * the panel stays responsive. It's an approximation (a few hundred chars of
+ * scaffolding aren't modeled), which is all the readout needs.
+ */
+const estimateContextChars = (opts: ContextOpts): number => {
+  const s = useAppStore.getState();
+  const { currentStory, chains, currentChainIndex, currentMessageIndex, streamingMessage, streamedText } = s;
+  // Zones and Branchline are hand-picked and small — the real builder is cheap.
+  if (opts.scope === 'zones' || opts.scope === 'swipes') return buildContext(opts).length;
+
+  const adv = s.aiAdvanced;
+  const cap = adv.contextSize > 0
+    ? Math.max(2000, adv.contextSize * 4 - Math.max(0, adv.maxTokens) * 4)
+    : MAX_CHARS;
+  const clen = (m: { id: string; content: string }) =>
+    (m.id === streamingMessage?.id ? streamedText.length : m.content.length);
+
+  let body = 0;
+  if (opts.scope === 'page') {
+    for (const m of chains[currentChainIndex]?.messages ?? []) body += m.name.length + clen(m) + 4;
+  } else {
+    outer: for (let ci = 0; ci < chains.length; ci++) {
+      const msgs = chains[ci].messages;
+      for (let mi = 0; mi < msgs.length; mi++) {
+        body += msgs[mi].name.length + clen(msgs[mi]) + 4;
+        if (opts.scope === 'here' && ci === currentChainIndex && mi === currentMessageIndex) break outer;
+      }
+    }
+  }
+  if (body > cap) body = cap;
+
+  // Bounded extras — summed, not built (only the small card block is materialized).
+  let extra = 0;
+  if (opts.includeHighlights) {
+    for (const h of currentStory?.highlights ?? []) extra += h.text.length + (h.note?.length ?? 0) + 12;
+  }
+  const v2 = useAuraV2Store.getState();
+  const sid = currentStory?.id ?? '';
+  let pinBudget = 200_000;
+  for (const p of (v2.pinsByStory[sid] ?? []).filter(p => p.inContext).slice(0, 6)) {
+    const l = Math.min(p.content.length, pinBudget);
+    extra += l + p.title.length + 6;
+    pinBudget -= l;
+  }
+  for (const sh of (v2.sheetsByStory[sid] ?? []).slice(0, 6)) extra += Math.min(sh.rows.length, 60) * 48 + 48;
+  extra += cardToPromptBlock(currentStory?.card).length;
+
+  return body + extra + 700;
 };
 
 const SCOPES: { value: Scope; label: string }[] = [
@@ -124,6 +233,7 @@ const SCOPES: { value: Scope; label: string }[] = [
   { value: 'here', label: 'Up to here' },
   { value: 'all', label: 'Whole story' },
   { value: 'swipes', label: 'Branchline' },
+  { value: 'zones', label: 'Zones' },
 ];
 
 const QUICK = [
@@ -142,34 +252,220 @@ const BRANCHLINE_QUICK = [
   { label: 'Blend them', prompt: 'Draft a single version that combines the strongest parts of each alternate version, keeping the character\'s voice.' },
 ];
 
-const Bubble = ({ role, content }: ChatMsg) => (
-  <div className={cn('flex', role === 'user' ? 'justify-end' : 'justify-start')}>
-    <div
-      className={cn(
-        'max-w-[85%] px-3.5 py-2.5 rounded-2xl text-sm',
-        role === 'user'
-          ? 'bg-accent text-white rounded-br-sm'
-          : 'bg-app-text/5 border border-app-border rounded-bl-sm',
-      )}
-    >
-      {role === 'assistant' ? (
-        <div className="markdown-body">
-          <ReactMarkdown remarkPlugins={[remarkGfm, remarkMath]} rehypePlugins={[rehypeKatex]}>
-            {content}
-          </ReactMarkdown>
+const Markdown = ({ children }: { children: string }) => (
+  <div className="markdown-body">
+    <ReactMarkdown remarkPlugins={[remarkGfm, remarkMath]} rehypePlugins={[rehypeKatex]}>
+      {children}
+    </ReactMarkdown>
+  </div>
+);
+
+/** A committed conversation turn, with swipe navigation + regenerate on the last reply. */
+const TurnView = React.memo(({
+  turn, isLast, busy, onSwipe, onRegenerate,
+}: {
+  turn: ChatTurn;
+  isLast: boolean;
+  busy: boolean;
+  onSwipe: (dir: -1 | 1) => void;
+  onRegenerate: () => void;
+}) => {
+  const content = turn.variants[turn.activeVariant] ?? turn.variants[0] ?? '';
+  const many = turn.variants.length > 1;
+  const isAssistant = turn.role === 'assistant';
+  return (
+    <div className={cn('flex flex-col', turn.role === 'user' ? 'items-end' : 'items-start')}>
+      <div
+        className={cn(
+          'max-w-[85%] px-3.5 py-2.5 rounded-2xl text-sm',
+          turn.role === 'user'
+            ? 'bg-accent text-white rounded-br-sm'
+            : 'bg-app-text/5 border border-app-border rounded-bl-sm',
+        )}
+      >
+        {isAssistant ? <Markdown>{content}</Markdown> : <span className="whitespace-pre-wrap">{content}</span>}
+      </div>
+      {isAssistant && (many || isLast) && (
+        <div className="flex items-center gap-0.5 mt-1 text-muted">
+          {many && (
+            <>
+              <button
+                onClick={() => onSwipe(-1)}
+                disabled={turn.activeVariant === 0}
+                className="p-0.5 rounded hover:bg-app-text/10 disabled:opacity-30"
+                title="Previous version"
+              >
+                <ChevronLeft size={13} />
+              </button>
+              <span className="text-[10px] font-mono tabular-nums">{turn.activeVariant + 1}/{turn.variants.length}</span>
+              <button
+                onClick={() => onSwipe(1)}
+                disabled={turn.activeVariant === turn.variants.length - 1}
+                className="p-0.5 rounded hover:bg-app-text/10 disabled:opacity-30"
+                title="Next version"
+              >
+                <ChevronRight size={13} />
+              </button>
+            </>
+          )}
+          {isLast && (
+            <button
+              onClick={onRegenerate}
+              disabled={busy}
+              className="p-0.5 rounded hover:bg-app-text/10 disabled:opacity-30"
+              title="Regenerate — get another version (swipe)"
+            >
+              <RefreshCw size={12} />
+            </button>
+          )}
         </div>
-      ) : (
-        <span className="whitespace-pre-wrap">{content}</span>
       )}
     </div>
+  );
+}, (a, b) => a.turn === b.turn && a.isLast === b.isLast && a.busy === b.busy);
+
+/** Number input that maps an empty field to `null` ("use server default"). */
+const NumField = ({
+  label, value, onChange, step = 0.05, min, max, placeholder = 'default',
+}: {
+  label: string;
+  value: number | null;
+  onChange: (v: number | null) => void;
+  step?: number;
+  min?: number;
+  max?: number;
+  placeholder?: string;
+}) => (
+  <label className="flex items-center justify-between gap-2 text-xs">
+    <span className="text-muted">{label}</span>
+    <input
+      type="number"
+      step={step}
+      min={min}
+      max={max}
+      value={value == null ? '' : value}
+      onChange={(e) => { const v = e.target.value; onChange(v === '' ? null : Number(v)); }}
+      placeholder={placeholder}
+      className="w-24 bg-app-text/5 border border-app-border rounded-md px-2 py-1 outline-none focus:border-accent/50"
+    />
+  </label>
+);
+
+/**
+ * Advanced generation controls. Deliberately tucked behind the sliders button
+ * and rendered as an overlay so the default panel stays simple — most readers
+ * never open this.
+ */
+const AdvancedPanel = ({
+  adv, onChange, localBase, onClose,
+}: {
+  adv: AiAdvancedConfig;
+  onChange: (patch: Partial<AiAdvancedConfig>) => void;
+  localBase: boolean;
+  onClose: () => void;
+}) => (
+  <div className="absolute inset-0 z-10 bg-surface/95 backdrop-blur-sm overflow-y-auto p-3.5 space-y-3">
+    <div className="flex items-center justify-between">
+      <span className="font-bold text-sm flex items-center gap-1.5">
+        <SlidersHorizontal size={15} className="text-accent" /> Advanced
+      </span>
+      <button onClick={onClose} className="p-1 rounded-full hover:bg-app-text/10 opacity-70 hover:opacity-100">
+        <X size={15} />
+      </button>
+    </div>
+
+    <label className="flex items-center justify-between gap-2 text-xs">
+      <span className="text-muted">Stream tokens</span>
+      <input
+        type="checkbox" checked={adv.streaming}
+        onChange={(e) => onChange({ streaming: e.target.checked })}
+        className="accent-[var(--app-accent)] w-4 h-4"
+      />
+    </label>
+
+    <div className="space-y-1.5">
+      <span className="text-[10px] uppercase tracking-wider text-muted font-bold">Samplers</span>
+      <NumField label="Temperature" value={adv.temperature} onChange={(v) => onChange({ temperature: v })} min={0} max={2} />
+      <NumField label="Top P" value={adv.topP} onChange={(v) => onChange({ topP: v })} min={0} max={1} />
+      <NumField label="Frequency penalty" value={adv.frequencyPenalty} onChange={(v) => onChange({ frequencyPenalty: v })} min={-2} max={2} />
+      <NumField label="Presence penalty" value={adv.presencePenalty} onChange={(v) => onChange({ presencePenalty: v })} min={-2} max={2} />
+    </div>
+
+    <label className="flex items-center justify-between gap-2 text-xs">
+      <span className="text-muted">Extended samplers <span className="opacity-60">(local backends)</span></span>
+      <input
+        type="checkbox" checked={adv.extendedSamplers}
+        onChange={(e) => onChange({ extendedSamplers: e.target.checked })}
+        className="accent-[var(--app-accent)] w-4 h-4"
+      />
+    </label>
+    {adv.extendedSamplers && (
+      <div className="space-y-1.5 pl-2 border-l-2 border-app-border">
+        {!localBase && (
+          <p className="text-[10px] text-amber-500">
+            Endpoint doesn't look local — top_k / min_p / repetition_penalty may be rejected by hosted APIs.
+          </p>
+        )}
+        <NumField label="Top K" value={adv.topK} onChange={(v) => onChange({ topK: v })} step={1} min={0} />
+        <NumField label="Min P" value={adv.minP} onChange={(v) => onChange({ minP: v })} min={0} max={1} />
+        <NumField label="Repetition penalty" value={adv.repetitionPenalty} onChange={(v) => onChange({ repetitionPenalty: v })} min={0} />
+      </div>
+    )}
+
+    <div className="space-y-1.5">
+      <span className="text-[10px] uppercase tracking-wider text-muted font-bold">Budget</span>
+      <NumField label="Max output tokens" value={adv.maxTokens || null} onChange={(v) => onChange({ maxTokens: v ?? 0 })} step={64} min={0} />
+      <NumField label="Context size (tokens)" value={adv.contextSize || null} onChange={(v) => onChange({ contextSize: v ?? 0 })} step={512} min={0} placeholder="auto" />
+    </div>
+
+    <label className="block text-xs space-y-1">
+      <span className="text-muted">System prompt <span className="opacity-60">(prepended)</span></span>
+      <textarea
+        rows={3} value={adv.systemPrompt}
+        onChange={(e) => onChange({ systemPrompt: e.target.value })}
+        placeholder="Extra persona / behavior instructions…"
+        className="w-full resize-y bg-app-text/5 border border-app-border rounded-md px-2 py-1.5 outline-none focus:border-accent/50"
+      />
+    </label>
+    <label className="block text-xs space-y-1">
+      <span className="text-muted">Context template <span className="opacity-60">{'(use {{content}}, optional {{system}})'}</span></span>
+      <textarea
+        rows={3} value={adv.contextTemplate}
+        onChange={(e) => onChange({ contextTemplate: e.target.value })}
+        placeholder="Leave blank to use the built-in structure."
+        className="w-full resize-y bg-app-text/5 border border-app-border rounded-md px-2 py-1.5 outline-none focus:border-accent/50 font-mono text-[11px]"
+      />
+    </label>
+
+    <button onClick={onClose} className="w-full py-1.5 rounded-md bg-accent text-white text-xs font-bold">Done</button>
   </div>
 );
 
 export const AIChat = () => {
-  const store = useAppStore();
-  const [messages, setMessages] = useState<ChatMsg[]>([]);
+  // Subscribe ONLY to the fields/actions the panel uses. A bare useAppStore()
+  // re-renders on every store write — including streamedText, which ticks dozens
+  // of times a second while the reader streams behind an open panel, re-running
+  // ReactMarkdown for every saved turn. useShallow keeps us off that hot path.
+  const store = useAppStore(useShallow(s => ({
+    currentStory: s.currentStory,
+    chains: s.chains,
+    currentChainIndex: s.currentChainIndex,
+    currentMessageIndex: s.currentMessageIndex,
+    aiBaseUrl: s.aiBaseUrl,
+    aiApiKey: s.aiApiKey,
+    aiModel: s.aiModel,
+    aiAdvanced: s.aiAdvanced,
+    lensEditTarget: s.lensEditTarget,
+    // Actions are stable references, so including them never triggers a re-render.
+    setAiModel: s.setAiModel,
+    setAiBaseUrl: s.setAiBaseUrl,
+    setAiApiKey: s.setAiApiKey,
+    setAiAdvanced: s.setAiAdvanced,
+    setAiOpen: s.setAiOpen,
+    restreamFromId: s.restreamFromId,
+    setLensEditTarget: s.setLensEditTarget,
+  })));
   const [input, setInput] = useState('');
-  const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [models, setModels] = useState<string[]>([]);
   const [resolvedBase, setResolvedBase] = useState('');
@@ -177,9 +473,20 @@ export const AIChat = () => {
   const [scope, setScope] = useState<Scope>('here');
   const [includeHighlights, setIncludeHighlights] = useState(true);
   const [focusCharacter, setFocusCharacter] = useState('');
+  const [activeZoneId, setActiveZoneId] = useState<string>('');
+  const [advancedOpen, setAdvancedOpen] = useState(false);
+  const [cowriteOpen, setCowriteOpen] = useState(false);
+  const [renaming, setRenaming] = useState(false);
+  const [renameValue, setRenameValue] = useState('');
+  // Live streaming state for the in-flight assistant reply.
+  const [streaming, setStreaming] = useState(false);
+  const [streamText, setStreamText] = useState('');
+  const abortRef = useRef<AbortController | null>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
 
   const hasHighlights = (store.currentStory?.highlights?.length ?? 0) > 0;
+
+  const adv = store.aiAdvanced;
 
   // Subscribe to the pins/sheets so the context-size readout (and the prompt)
   // update the moment a pin is toggled into context — buildContext reads these
@@ -188,6 +495,82 @@ export const AIChat = () => {
   const pins = useAuraV2Store(s => (storyId ? s.pinsByStory[storyId] : undefined));
   const sheets = useAuraV2Store(s => (storyId ? s.sheetsByStory[storyId] : undefined));
   const inContextPins = (pins ?? []).filter(p => p.inContext).length;
+
+  // Context Zones live in the v2 store, keyed per story.
+  const zones = useAuraV2Store(s => (storyId ? s.zonesByStory[storyId] : undefined));
+  const zoneBuilderOpen = useAuraV2Store(s => s.zoneBuilderOpen);
+  const openZoneBuilder = useAuraV2Store(s => s.openZoneBuilder);
+  const zoneList = zones ?? [];
+  const activeZone = zoneList.find(z => z.id === activeZoneId);
+
+  // Keep a valid zone selected: default to the first, and recover if the
+  // active one is deleted out from under us.
+  useEffect(() => {
+    if (scope !== 'zones') return;
+    if (!activeZone && zoneList.length) setActiveZoneId(zoneList[0].id);
+  }, [scope, activeZone, zoneList]);
+
+  // Conversation threads (persisted per story) — the assistant's branch system.
+  const threads = useAuraV2Store(s => (storyId ? s.chatThreadsByStory[storyId] : undefined)) ?? [];
+  const activeThreadId = useAuraV2Store(s => (storyId ? s.activeThreadByStory[storyId] : undefined));
+  const ensureActiveThread = useAuraV2Store(s => s.ensureActiveThread);
+  const createThread = useAuraV2Store(s => s.createThread);
+  const renameThread = useAuraV2Store(s => s.renameThread);
+  const removeThread = useAuraV2Store(s => s.removeThread);
+  const setActiveThread = useAuraV2Store(s => s.setActiveThread);
+  const addTurn = useAuraV2Store(s => s.addTurn);
+  const appendVariant = useAuraV2Store(s => s.appendVariant);
+  const setActiveVariant = useAuraV2Store(s => s.setActiveVariant);
+  const setOverride = useAuraV2Store(s => s.setOverride);
+
+  const activeThread = threads.find(t => t.id === activeThreadId) ?? threads[threads.length - 1];
+  const turns = activeThread?.turns ?? [];
+
+  // Lens Edit: draft an AI rewrite of a chosen message into the Lens override layer.
+  const [lensMode, setLensMode] = useState(false);
+  const [lensTargetId, setLensTargetId] = useState<string>('');
+  // flatWithIndex allocates an object per message across the whole story — a real
+  // cost on mount for long stories. Only Lens needs it, so build it lazily: when
+  // Lens mode is active, a Lens edit is pending, or the thread already holds a
+  // Lens turn (so regenerate/swipe on it can still resolve the target).
+  const needFlat = lensMode || !!store.lensEditTarget || turns.some(t => t.lensTargetId);
+  const flat = useMemo(
+    () => (needFlat ? flatWithIndex(store.chains) : NO_FLAT),
+    [needFlat, store.chains],
+  );
+  const lensTarget = flat.find(f => f.msg.id === lensTargetId);
+
+  const enterLens = () => {
+    setLensMode(true);
+    if (!flat.some(f => f.msg.id === lensTargetId)) {
+      const cur = store.chains[store.currentChainIndex]?.messages[store.currentMessageIndex]?.id;
+      setLensTargetId(cur ?? flat[0]?.msg.id ?? '');
+    }
+  };
+  const moveTarget = (delta: 1 | -1) => {
+    const i = lensTarget ? lensTarget.index - 1 : 0;
+    const next = flat[Math.min(flat.length - 1, Math.max(0, i + delta))];
+    if (next) setLensTargetId(next.msg.id);
+  };
+
+  // A message's "Lens edit" button opens the panel and jumps straight into edit mode.
+  useEffect(() => {
+    if (!store.lensEditTarget) return;
+    setLensMode(true);
+    setLensTargetId(store.lensEditTarget);
+    store.setLensEditTarget(null);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [store.lensEditTarget]);
+
+  // Restore a previously-active thread on open without creating empty ones.
+  useEffect(() => {
+    if (!storyId) return;
+    const st = useAuraV2Store.getState();
+    const list = st.chatThreadsByStory[storyId] ?? [];
+    if (list.length && !list.some(t => t.id === st.activeThreadByStory[storyId])) {
+      st.setActiveThread(storyId, list[0].id);
+    }
+  }, [storyId]);
 
   // How many alternate versions the reader's current message has — gates the
   // "Branchline" scope, which only makes sense with more than one swipe.
@@ -200,13 +583,15 @@ export const AIChat = () => {
     if (scope === 'swipes' && swipeCount < 2) setScope('here');
   }, [scope, swipeCount]);
 
-  // Approximate size of the context that will be sent, for transparency.
+  // Approximate size of the context that will be sent, for transparency. Uses a
+  // cheap length estimate (not the full prompt build) so it never blocks the UI.
+  // focusCharacter is excluded — it only adds a short line, negligible here.
   const contextChars = useMemo(
-    () => buildContext({ scope, includeHighlights, focusCharacter }).length,
+    () => estimateContextChars({ scope, includeHighlights, focusCharacter, zoneId: activeZoneId }),
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [scope, includeHighlights, focusCharacter, store.currentChainIndex,
+    [scope, includeHighlights, activeZoneId, zones, store.currentChainIndex,
      store.currentMessageIndex, store.currentStory?.id, store.currentStory?.highlights,
-     pins, sheets],
+     pins, sheets, adv],
   );
   const approxTokens = Math.round(contextChars / 4);
   const sizeLabel = approxTokens >= 1000 ? `~${(approxTokens / 1000).toFixed(1)}k tok` : `~${approxTokens} tok`;
@@ -215,7 +600,7 @@ export const AIChat = () => {
 
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: 'smooth' });
-  }, [messages, loading]);
+  }, [turns.length, streamText, streaming]);
 
   const loadModels = async () => {
     setProbing(true); setError(null);
@@ -231,50 +616,264 @@ export const AIChat = () => {
     }
   };
 
-  const send = async (text: string) => {
-    const content = text.trim();
-    if (!content || loading) return;
-    const history: ChatMsg[] = [...messages, { role: 'user', content }];
-    setMessages(history);
-    setInput('');
-    setLoading(true); setError(null);
+  /**
+   * Run one assistant generation on a thread. When `regenTurnId` is set the
+   * reply is appended as a new swipe on that turn (history excludes it);
+   * otherwise a fresh assistant turn is committed at the end.
+   */
+  const runAssistant = async (threadId: string, regenTurnId: string | null) => {
+    if (!storyId) return;
+    setError(null);
+    setStreaming(true);
+    setStreamText('');
+    const controller = new AbortController();
+    abortRef.current = controller;
+    const scopeLabel = SCOPES.find(x => x.value === scope)?.label;
     try {
       const base = resolvedBase || candidateBases(store.aiBaseUrl)[0];
-      const reply = await chatCompletion(
-        base, store.aiApiKey, store.aiModel,
-        [{ role: 'system', content: buildContext({ scope, includeHighlights, focusCharacter }) }, ...history],
-      );
-      setMessages([...history, { role: 'assistant', content: reply }]);
+      const system = buildContext({ scope, includeHighlights, focusCharacter, zoneId: activeZoneId });
+
+      // Build history from the freshly-committed thread state.
+      const thread = useAuraV2Store.getState().chatThreadsByStory[storyId]?.find(t => t.id === threadId);
+      let hist = thread?.turns ?? [];
+      if (regenTurnId) {
+        const idx = hist.findIndex(t => t.id === regenTurnId);
+        if (idx >= 0) hist = hist.slice(0, idx);
+      }
+      const apiMsgs: ChatMsg[] = [
+        { role: 'system', content: system },
+        ...hist.map(t => ({
+          role: t.role,
+          content: t.variants[t.activeVariant] ?? t.variants[0] ?? '',
+        })),
+      ];
+
+      const params = samplerParamsFrom(adv);
+      let full: string;
+      if (adv.streaming) {
+        full = await chatCompletionStream(
+          base, store.aiApiKey, store.aiModel, apiMsgs, params,
+          (_delta, whole) => setStreamText(whole), controller.signal,
+        );
+      } else {
+        full = await chatCompletion(base, store.aiApiKey, store.aiModel, apiMsgs, params, controller.signal);
+        setStreamText(full);
+      }
+      full = full.trim();
+      if (!full) throw new Error('The model returned an empty reply.');
+      if (regenTurnId) appendVariant(storyId, threadId, regenTurnId, full);
+      else addTurn(storyId, threadId, { role: 'assistant', variants: [full], activeVariant: 0, scopeLabel });
     } catch (e: any) {
-      setError(e?.message ?? 'Request failed.');
+      if (e?.name !== 'AbortError') setError(e?.message ?? 'Request failed.');
     } finally {
-      setLoading(false);
+      setStreaming(false);
+      setStreamText('');
+      abortRef.current = null;
     }
   };
 
+  /** Write a rewrite into the Lens layer (auto-enables lens) and replay it in the reader. */
+  const applyLens = (messageId: string, text: string, instruction?: string) => {
+    if (!storyId || !text.trim()) return;
+    setOverride(storyId, {
+      messageId, kind: 'rewrite', content: text.trim(), source: 'ai',
+      note: instruction, createdAt: Date.now(),
+    });
+    // Jump the reader to the message and restream it with the new Lens content.
+    store.restreamFromId(messageId);
+  };
+
+  /**
+   * Generate a Lens rewrite of a single message. Streams the draft into the chat
+   * thread, commits it as a lens turn (its variants are drafts), and applies it.
+   */
+  const runLens = async (threadId: string, regenTurnId: string | null, targetId: string, instruction: string) => {
+    if (!storyId) return;
+    const entry = flat.find(f => f.msg.id === targetId);
+    if (!entry) { setError('Pick a message to edit.'); return; }
+    const v2 = useAuraV2Store.getState();
+    // Rewrite whatever is currently shown, so successive edits build on each other.
+    const current = resolveContent(entry.msg, v2.overridesByStory[storyId], !!v2.lensOnByStory[storyId]);
+
+    setError(null);
+    setStreaming(true);
+    setStreamText('');
+    const controller = new AbortController();
+    abortRef.current = controller;
+    try {
+      const base = resolvedBase || candidateBases(store.aiBaseUrl)[0];
+      const card = cardToPromptBlock(store.currentStory?.card);
+      const system = [
+        `You are revising a single passage from the story "${store.currentStory?.title ?? 'Untitled'}" for the reader's private "Lens" layer.`,
+        'Rewrite the PASSAGE according to the INSTRUCTION. Keep the speaker\'s voice and the meaning intact unless the instruction says otherwise.',
+        'Output ONLY the rewritten passage — no preamble, no surrounding quotes, no commentary.',
+        card ? `\n${card}` : '',
+      ].filter(Boolean).join('\n');
+      const apiMsgs: ChatMsg[] = [
+        { role: 'system', content: system },
+        { role: 'user', content: `INSTRUCTION: ${instruction}\n\nPASSAGE (speaker: ${entry.msg.name}):\n${current}` },
+      ];
+      const params = samplerParamsFrom(adv);
+      let full: string;
+      if (adv.streaming) {
+        full = await chatCompletionStream(
+          base, store.aiApiKey, store.aiModel, apiMsgs, params,
+          (_d, whole) => setStreamText(whole), controller.signal,
+        );
+      } else {
+        full = await chatCompletion(base, store.aiApiKey, store.aiModel, apiMsgs, params, controller.signal);
+        setStreamText(full);
+      }
+      full = full.trim();
+      if (!full) throw new Error('The model returned an empty rewrite.');
+      if (regenTurnId) appendVariant(storyId, threadId, regenTurnId, full);
+      else addTurn(storyId, threadId, {
+        role: 'assistant', variants: [full], activeVariant: 0,
+        scopeLabel: `Lens → #${entry.index}`, lensTargetId: targetId, lensInstruction: instruction,
+      });
+      applyLens(targetId, full, instruction);
+    } catch (e: any) {
+      if (e?.name !== 'AbortError') setError(e?.message ?? 'Request failed.');
+    } finally {
+      setStreaming(false);
+      setStreamText('');
+      abortRef.current = null;
+    }
+  };
+
+  /**
+   * Run a cowriting preset. The payload is assembled by buildCowritePayload
+   * (reference in the system block, candidate branches + instruction in the
+   * final user turn) and sent as a self-contained [system, user] pair — no
+   * prior thread history, so placement isn't diluted. The resolved spec is
+   * stored on the turn so regenerate rebuilds the identical request.
+   */
+  const runCowrite = async (threadId: string, regenTurnId: string | null, spec: CowriteRunSpec) => {
+    if (!storyId) return;
+    setError(null);
+    setStreaming(true);
+    setStreamText('');
+    const controller = new AbortController();
+    abortRef.current = controller;
+    try {
+      const base = resolvedBase || candidateBases(store.aiBaseUrl)[0];
+      const v2 = useAuraV2Store.getState();
+      const resolve = (m: Message) => resolveContent(m, v2.overridesByStory[storyId], !!v2.lensOnByStory[storyId]);
+      const { system, userMessage, empty } =
+        buildCowritePayload(spec, store.chains, resolve, store.currentStory ?? undefined);
+      if (empty) throw new Error('No candidate versions to send.');
+      const apiMsgs: ChatMsg[] = [
+        { role: 'system', content: system },
+        { role: 'user', content: userMessage },
+      ];
+      const params = samplerParamsFrom(adv);
+      let full: string;
+      if (adv.streaming) {
+        full = await chatCompletionStream(
+          base, store.aiApiKey, store.aiModel, apiMsgs, params,
+          (_d, whole) => setStreamText(whole), controller.signal,
+        );
+      } else {
+        full = await chatCompletion(base, store.aiApiKey, store.aiModel, apiMsgs, params, controller.signal);
+        setStreamText(full);
+      }
+      full = full.trim();
+      if (!full) throw new Error('The model returned an empty reply.');
+      if (regenTurnId) appendVariant(storyId, threadId, regenTurnId, full);
+      else addTurn(storyId, threadId, {
+        role: 'assistant', variants: [full], activeVariant: 0,
+        scopeLabel: `Cowrite → ${spec.presetName}`, cowriteSpec: spec,
+      });
+    } catch (e: any) {
+      if (e?.name !== 'AbortError') setError(e?.message ?? 'Request failed.');
+    } finally {
+      setStreaming(false);
+      setStreamText('');
+      abortRef.current = null;
+    }
+  };
+
+  const startCowrite = (spec: CowriteRunSpec) => {
+    if (!storyId || streaming) return;
+    const threadId = ensureActiveThread(storyId);
+    const n = spec.candidates.length;
+    const summary = `⨺ ${spec.presetName}: ${n} branch${n === 1 ? '' : 'es'}${spec.referenceIds.length ? ` · ref ${spec.referenceIds.length}` : ''}`;
+    addTurn(storyId, threadId, { role: 'user', variants: [summary], activeVariant: 0 });
+    setCowriteOpen(false);
+    void runCowrite(threadId, null, spec);
+  };
+
+  const send = async (text: string) => {
+    const content = text.trim();
+    if (!content || streaming || !storyId) return;
+    const threadId = ensureActiveThread(storyId);
+
+    if (lensMode) {
+      if (!lensTarget) { setError('Pick a message to edit.'); return; }
+      addTurn(storyId, threadId, {
+        role: 'user', variants: [`✎ Lens edit #${lensTarget.index}: ${content}`], activeVariant: 0,
+      });
+      setInput('');
+      await runLens(threadId, null, lensTarget.msg.id, content);
+      return;
+    }
+
+    addTurn(storyId, threadId, { role: 'user', variants: [content], activeVariant: 0 });
+    setInput('');
+    await runAssistant(threadId, null);
+  };
+
+  const regenerate = () => {
+    if (streaming || !storyId || !activeThread) return;
+    const last = turns[turns.length - 1];
+    if (last?.role !== 'assistant') return;
+    if (last.cowriteSpec) void runCowrite(activeThread.id, last.id, last.cowriteSpec);
+    else if (last.lensTargetId) void runLens(activeThread.id, last.id, last.lensTargetId, last.lensInstruction ?? '');
+    else void runAssistant(activeThread.id, last.id);
+  };
+
+  const stop = () => abortRef.current?.abort();
+
+  const swipeTurn = (turn: ChatTurn, dir: -1 | 1) => {
+    if (!storyId || !activeThread) return;
+    const idx = turn.activeVariant + dir;
+    setActiveVariant(storyId, activeThread.id, turn.id, idx);
+    // Switching between drafts of a Lens edit re-applies the shown one to the reader.
+    if (turn.lensTargetId && turn.variants[idx]) applyLens(turn.lensTargetId, turn.variants[idx], turn.lensInstruction);
+  };
+
+  const startRename = () => {
+    if (!activeThread) return;
+    setRenameValue(activeThread.name);
+    setRenaming(true);
+  };
+  const commitRename = () => {
+    if (storyId && activeThread && renameValue.trim()) renameThread(storyId, activeThread.id, renameValue);
+    setRenaming(false);
+  };
+  const newThread = () => {
+    if (!storyId) return;
+    createThread(storyId);
+    setRenaming(false);
+  };
+  const deleteThread = () => {
+    if (storyId && activeThread) removeThread(storyId, activeThread.id);
+    setRenaming(false);
+  };
+
   return (
+    <>
     <div className="fixed bottom-4 right-4 z-[65] w-[min(420px,92vw)] h-[min(620px,80vh)] flex flex-col rounded-2xl border border-app-border bg-surface shadow-2xl overflow-hidden">
       <div className="flex items-center justify-between px-4 py-3 border-b border-app-border bg-app-text/5">
         <div className="flex items-center gap-2 font-bold text-sm">
           <Bot size={17} className="text-accent" /> Reading Assistant
         </div>
-        <div className="flex items-center gap-1">
-          {messages.length > 0 && (
-            <button
-              onClick={() => setMessages([])}
-              title="Clear chat"
-              className="p-1.5 rounded-full opacity-60 hover:opacity-100 hover:bg-app-text/10"
-            >
-              <RefreshCw size={15} />
-            </button>
-          )}
-          <button
-            onClick={() => store.setAiOpen(false)}
-            className="p-1.5 rounded-full opacity-60 hover:opacity-100 hover:bg-app-text/10"
-          >
-            <X size={16} />
-          </button>
-        </div>
+        <button
+          onClick={() => store.setAiOpen(false)}
+          className="p-1.5 rounded-full opacity-60 hover:opacity-100 hover:bg-app-text/10"
+        >
+          <X size={16} />
+        </button>
       </div>
 
       {!configured ? (
@@ -343,6 +942,66 @@ export const AIChat = () => {
         </div>
       ) : (
         <>
+          {/* Thread bar — the assistant's saved conversation branches. */}
+          <div className="flex items-center gap-1 px-2.5 py-1.5 border-b border-app-border text-xs">
+            {renaming ? (
+              <>
+                <input
+                  autoFocus
+                  value={renameValue}
+                  onChange={(e) => setRenameValue(e.target.value)}
+                  onKeyDown={(e) => { if (e.key === 'Enter') commitRename(); if (e.key === 'Escape') setRenaming(false); }}
+                  className="flex-1 min-w-0 bg-app-text/5 border border-app-border rounded-md px-2 py-1 outline-none focus:border-accent/50"
+                />
+                <button onClick={commitRename} title="Save name" className="p-1 rounded hover:bg-app-text/10 text-accent">
+                  <Check size={14} />
+                </button>
+              </>
+            ) : (
+              <>
+                <select
+                  value={activeThread?.id ?? ''}
+                  onChange={(e) => storyId && setActiveThread(storyId, e.target.value)}
+                  disabled={threads.length === 0}
+                  className="flex-1 min-w-0 bg-app-text/5 border border-app-border rounded-md px-2 py-1 outline-none focus:border-accent/50 disabled:opacity-60"
+                >
+                  {threads.length === 0 ? (
+                    <option value="" className="text-black bg-white">New chat</option>
+                  ) : (
+                    threads.map(t => (
+                      <option key={t.id} value={t.id} className="text-black bg-white">
+                        {t.name} ({t.turns.length})
+                      </option>
+                    ))
+                  )}
+                </select>
+                <button
+                  onClick={startRename}
+                  disabled={!activeThread}
+                  title="Rename this chat"
+                  className="p-1 rounded hover:bg-app-text/10 opacity-70 hover:opacity-100 disabled:opacity-30"
+                >
+                  <Pencil size={13} />
+                </button>
+                <button
+                  onClick={deleteThread}
+                  disabled={!activeThread}
+                  title="Delete this chat"
+                  className="p-1 rounded hover:bg-app-text/10 opacity-70 hover:opacity-100 disabled:opacity-30"
+                >
+                  <Trash2 size={13} />
+                </button>
+                <button
+                  onClick={newThread}
+                  title="Start a new chat branch"
+                  className="p-1 rounded hover:bg-app-text/10 text-accent"
+                >
+                  <Plus size={15} />
+                </button>
+              </>
+            )}
+          </div>
+
           <div className="border-b border-app-border px-2.5 py-2 space-y-2 bg-app-text/[0.03]">
             <div className="flex items-center justify-between">
               <span className="text-[10px] uppercase tracking-wider text-muted font-bold">Context</span>
@@ -385,6 +1044,41 @@ export const AIChat = () => {
                 );
               })}
             </div>
+            {scope === 'zones' && (
+              <div className="flex items-center gap-1.5">
+                {zoneList.length > 0 ? (
+                  <select
+                    value={activeZoneId}
+                    onChange={(e) => setActiveZoneId(e.target.value)}
+                    className="flex-1 min-w-0 bg-app-text/5 border border-app-border rounded-md px-2 py-1 text-xs outline-none focus:border-accent/50"
+                  >
+                    {zoneList.map(z => (
+                      <option key={z.id} value={z.id} className="text-black bg-white">
+                        {z.name}{store.chains.length ? ` — ${zoneSummary(z, store.chains)}` : ''}
+                      </option>
+                    ))}
+                  </select>
+                ) : (
+                  <span className="flex-1 text-[11px] text-muted italic">No zones yet — build one to pick messages &amp; branchlines.</span>
+                )}
+                {zoneList.length > 0 && (
+                  <button
+                    onClick={() => openZoneBuilder(activeZoneId || zoneList[0].id)}
+                    title="Edit this zone"
+                    className="text-[11px] px-2 py-1 rounded-md border border-app-border hover:bg-app-text/5 whitespace-nowrap"
+                  >
+                    Edit
+                  </button>
+                )}
+                <button
+                  onClick={() => openZoneBuilder(null)}
+                  title="Build a new context zone"
+                  className="text-[11px] px-2 py-1 rounded-md border border-accent bg-accent/10 text-accent font-bold whitespace-nowrap"
+                >
+                  + New
+                </button>
+              </div>
+            )}
             <div className="flex items-center gap-2">
               <input
                 type="text"
@@ -409,8 +1103,8 @@ export const AIChat = () => {
             </div>
           </div>
 
-          <div className="flex-1 overflow-y-auto p-3 space-y-3">
-            {messages.length === 0 && (
+          <div className="flex-1 overflow-y-auto p-3 space-y-3 relative">
+            {turns.length === 0 && !streaming && (
               <div className="space-y-2 pt-2">
                 <p className="text-xs text-muted text-center">
                   Ask about the story — context: <b>{SCOPES.find(s => s.value === scope)?.label}</b>
@@ -429,48 +1123,152 @@ export const AIChat = () => {
                 </div>
               </div>
             )}
-            {messages.map((m, i) => <Bubble key={i} {...m} />)}
-            {loading && (
+            {turns.map((t, i) => (
+              <TurnView
+                key={t.id}
+                turn={t}
+                isLast={i === turns.length - 1 && !streaming}
+                busy={streaming}
+                onSwipe={(dir) => swipeTurn(t, dir)}
+                onRegenerate={regenerate}
+              />
+            ))}
+            {streaming && (
               <div className="flex justify-start">
-                <div className="px-3.5 py-2.5 rounded-2xl bg-app-text/5 border border-app-border">
-                  <Loader2 size={16} className="animate-spin opacity-60" />
+                <div className="max-w-[85%] px-3.5 py-2.5 rounded-2xl bg-app-text/5 border border-app-border rounded-bl-sm text-sm">
+                  {streamText
+                    ? <Markdown>{streamText}</Markdown>
+                    : <Loader2 size={16} className="animate-spin opacity-60" />}
                 </div>
               </div>
             )}
             {error && <p className="text-red-500 text-xs px-1">{error}</p>}
             <div ref={bottomRef} />
+
+            {advancedOpen && (
+              <AdvancedPanel
+                adv={adv}
+                onChange={store.setAiAdvanced}
+                localBase={isLocalBase(resolvedBase || store.aiBaseUrl)}
+                onClose={() => setAdvancedOpen(false)}
+              />
+            )}
+
+            {cowriteOpen && (
+              <CowritePanel
+                chains={store.chains}
+                currentMessageId={store.chains[store.currentChainIndex]?.messages[store.currentMessageIndex]?.id}
+                onRun={startCowrite}
+                onClose={() => setCowriteOpen(false)}
+              />
+            )}
           </div>
 
-          <div className="border-t border-app-border p-2.5 flex items-end gap-2">
-            <div className="flex items-center gap-1 shrink-0">
-              <button
-                onClick={() => store.setAiModel('')}
-                title={`Model: ${store.aiModel} — click to reconfigure`}
-                className="text-[10px] max-w-[90px] truncate px-2 py-1 rounded-md bg-app-text/5 hover:bg-app-text/10"
-              >
-                {store.aiModel}
-              </button>
+          <div className="border-t border-app-border p-2.5 space-y-2">
+            {lensMode && (
+              <div className="flex items-center gap-1.5 text-[11px] rounded-md bg-accent/[0.07] border border-accent/40 px-2 py-1.5">
+                <Wand2 size={13} className="text-accent shrink-0" />
+                <span className="text-accent font-bold shrink-0">Lens edit</span>
+                <span className="text-muted shrink-0">→ #</span>
+                <input
+                  type="number"
+                  min={1}
+                  max={flat.length}
+                  value={lensTarget?.index ?? ''}
+                  onChange={(e) => {
+                    const n = parseInt(e.target.value, 10);
+                    const f = flat.find(x => x.index === n);
+                    if (f) setLensTargetId(f.msg.id);
+                  }}
+                  className="w-12 bg-app-text/5 border border-app-border rounded px-1 py-0.5 outline-none focus:border-accent/50"
+                />
+                <button onClick={() => moveTarget(-1)} className="p-0.5 rounded hover:bg-app-text/10" title="Previous message"><ChevronLeft size={13} /></button>
+                <button onClick={() => moveTarget(1)} className="p-0.5 rounded hover:bg-app-text/10" title="Next message"><ChevronRight size={13} /></button>
+                <span className="flex-1 min-w-0 truncate text-muted" title={lensTarget?.msg.content}>
+                  {lensTarget ? `${lensTarget.msg.name}: ${lensTarget.msg.content.replace(/\s+/g, ' ').slice(0, 40)}` : 'no message selected'}
+                </span>
+                <button onClick={() => setLensMode(false)} className="p-0.5 rounded hover:bg-app-text/10 opacity-70 hover:opacity-100 shrink-0" title="Exit Lens edit"><X size={13} /></button>
+              </div>
+            )}
+            <div className="flex items-end gap-2">
+              <div className="flex items-center gap-1 shrink-0">
+                <button
+                  onClick={() => store.setAiModel('')}
+                  title={`Model: ${store.aiModel} — click to reconfigure`}
+                  className="text-[10px] max-w-[64px] truncate px-2 py-1 rounded-md bg-app-text/5 hover:bg-app-text/10"
+                >
+                  {store.aiModel}
+                </button>
+                <button
+                  onClick={lensMode ? () => setLensMode(false) : enterLens}
+                  title="Lens edit — have the AI rewrite a message into the Lens layer"
+                  className={cn(
+                    'p-1.5 rounded-md hover:bg-app-text/10',
+                    lensMode ? 'text-accent bg-accent/10' : 'opacity-60 hover:opacity-100',
+                  )}
+                >
+                  <Wand2 size={15} />
+                </button>
+                <button
+                  onClick={() => setCowriteOpen(v => !v)}
+                  title="Cowrite — rank, blend, or check branches with a preset"
+                  className={cn(
+                    'p-1.5 rounded-md hover:bg-app-text/10',
+                    cowriteOpen ? 'text-accent bg-accent/10' : 'opacity-60 hover:opacity-100',
+                  )}
+                >
+                  <Combine size={15} />
+                </button>
+                <button
+                  onClick={() => setAdvancedOpen(v => !v)}
+                  title="Advanced generation settings"
+                  className={cn(
+                    'p-1.5 rounded-md hover:bg-app-text/10',
+                    advancedOpen ? 'text-accent bg-accent/10' : 'opacity-60 hover:opacity-100',
+                  )}
+                >
+                  <SlidersHorizontal size={15} />
+                </button>
+              </div>
+              <textarea
+                rows={1}
+                value={input}
+                onChange={(e) => setInput(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send(input); }
+                }}
+                placeholder={lensMode ? "Describe the revision (e.g. 'rewrite in Spanish')…" : 'Ask about the story…'}
+                className="flex-1 resize-none max-h-28 bg-app-text/5 border border-app-border rounded-lg px-3 py-2 text-sm outline-none focus:border-accent/50"
+              />
+              {streaming ? (
+                <button
+                  onClick={stop}
+                  title="Stop generating"
+                  className="p-2 rounded-lg bg-app-text/10 hover:bg-app-text/20 shrink-0"
+                >
+                  <Square size={16} className="fill-current" />
+                </button>
+              ) : (
+                <button
+                  onClick={() => send(input)}
+                  disabled={!input.trim()}
+                  className="p-2 rounded-lg bg-accent text-white disabled:opacity-40 shrink-0"
+                  title={lensMode ? 'Generate Lens rewrite' : 'Send'}
+                >
+                  {lensMode ? <Wand2 size={16} /> : <Send size={16} />}
+                </button>
+              )}
             </div>
-            <textarea
-              rows={1}
-              value={input}
-              onChange={(e) => setInput(e.target.value)}
-              onKeyDown={(e) => {
-                if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send(input); }
-              }}
-              placeholder="Ask about the story…"
-              className="flex-1 resize-none max-h-28 bg-app-text/5 border border-app-border rounded-lg px-3 py-2 text-sm outline-none focus:border-accent/50"
-            />
-            <button
-              onClick={() => send(input)}
-              disabled={loading || !input.trim()}
-              className="p-2 rounded-lg bg-accent text-white disabled:opacity-40 shrink-0"
-            >
-              <Send size={16} />
-            </button>
           </div>
         </>
       )}
     </div>
+    {zoneBuilderOpen && storyId && (
+      <ContextZoneBuilder
+        storyId={storyId}
+        onSaved={(id) => { setScope('zones'); setActiveZoneId(id); }}
+      />
+    )}
+    </>
   );
 };

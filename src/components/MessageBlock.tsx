@@ -1,7 +1,7 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
-import { ChevronLeft, ChevronRight, MessageSquare, Pencil, Pin as PinIcon } from 'lucide-react';
+import { ChevronLeft, ChevronRight, MessageSquare, Pencil, Pin as PinIcon, Wand2 } from 'lucide-react';
 import { cn } from '../utils/cn';
 import {
   AnimationStyle,
@@ -248,6 +248,8 @@ export interface MessageBlockProps {
   onOpenNotes?: (messageId: string) => void;
   /** Pins a table/code visual from this message to the side dock. */
   onPinContent?: (messageId: string, content: string, format: PinFormat) => void;
+  /** Opens the AI assistant in Lens-edit mode targeting this message. */
+  onLensEdit?: (messageId: string) => void;
   msgAnim: AnimationStyle;
   /** Per-word streaming effect (independent of the block reveal). */
   streamEffect: StreamEffect;
@@ -570,6 +572,7 @@ export const MessageBlock = React.memo((props: MessageBlockProps) => {
     noteCount = 0,
     onOpenNotes,
     onPinContent,
+    onLensEdit,
     msgAnim,
     streamEffect,
     theme,
@@ -735,8 +738,17 @@ export const MessageBlock = React.memo((props: MessageBlockProps) => {
               hidden
             </span>
           )}
-          {(noteCount > 0 || hasOverride || onPinContent) && !isStreamingMsg && (
+          {(noteCount > 0 || hasOverride || onPinContent || onLensEdit) && !isStreamingMsg && (
             <span className="ml-auto flex items-center gap-0.5">
+              {onLensEdit && (
+                <button
+                  onClick={(e) => { e.stopPropagation(); onLensEdit(msg.id); }}
+                  title="Lens edit — have the AI rewrite this message"
+                  className="p-1 rounded-full text-app-text/50 hover:text-accent hover:bg-accent/10 opacity-0 group-hover:opacity-100 transition-opacity"
+                >
+                  <Wand2 size={12} />
+                </button>
+              )}
               {onPinContent && (
                 <button
                   onClick={(e) => { e.stopPropagation(); onPinContent(msg.id, displayContent, 'markdown'); }}
@@ -783,6 +795,7 @@ export const MessageBlock = React.memo((props: MessageBlockProps) => {
     && prev.noteCount === next.noteCount
     && prev.onOpenNotes === next.onOpenNotes
     && prev.onPinContent === next.onPinContent
+    && prev.onLensEdit === next.onLensEdit
     && prev.streamEffect === next.streamEffect
     && prev.isStreamingMsg === next.isStreamingMsg
     && prev.isMsgZoomed === next.isMsgZoomed

@@ -1,7 +1,7 @@
 import React from 'react';
 import { create } from 'zustand';
 import { createJSONStorage, persist, StateStorage } from 'zustand/middleware';
-import { Annotation, Chain, Message, MessageOverride, Pin, Sheet } from '../types';
+import { Annotation, Chain, ChatThread, ChatTurn, ContextZone, CowritePreset, Message, MessageOverride, Pin, PinSet, Sheet } from '../types';
 import { useAppStore } from '../store';
 
 /**
@@ -279,8 +279,13 @@ const MAX_ENTITIES_PER_STORY = 300;
 const MAX_TRACKED_STORIES = 24;
 const MAX_OVERRIDES_PER_STORY = 500;
 const MAX_PINS_PER_STORY = 24;
+const MAX_PIN_SETS_PER_STORY = 30;
 /** Generous cap per pinned visual (~25k words) — big summary docs fit intact. */
 const MAX_PIN_CONTENT = 150_000;
+const MAX_ZONES_PER_STORY = 40;
+const MAX_THREADS_PER_STORY = 30;
+/** Trim a thread's history so a runaway conversation can't bloat localStorage. */
+const MAX_TURNS_PER_THREAD = 400;
 
 const normName = (s: string) => s.trim().toLowerCase();
 
@@ -305,6 +310,22 @@ interface AuraV2State {
   /* Pinned visuals (persisted) */
   pinsByStory: Record<string, Pin[]>;
 
+  /* Named, swappable pin arrangements — "saved views" (persisted) */
+  pinSetsByStory: Record<string, PinSet[]>;
+  /** Which set is currently applied per story; absent = none. */
+  activePinSetByStory: Record<string, string>;
+
+  /* Context Zones — named AI-context selections (persisted) */
+  zonesByStory: Record<string, ContextZone[]>;
+
+  /* Assistant conversation threads (persisted) */
+  chatThreadsByStory: Record<string, ChatThread[]>;
+  /** Active thread id per story. */
+  activeThreadByStory: Record<string, string>;
+
+  /* Cowriting presets — reusable, global (not per-story) draft-time recipes. */
+  cowritePresets: CowritePreset[];
+
   /* Codex preferences (persisted) */
   codexEnabled: boolean;
   /** Use the configured OpenAI-compatible endpoint for extraction. */
@@ -327,6 +348,10 @@ interface AuraV2State {
   currentSheetId: string | null;
   /** Right-margin pin dock visible (transient, defaults on). */
   pinDockOpen: boolean;
+  /** Context Zone builder modal open (transient). */
+  zoneBuilderOpen: boolean;
+  /** Zone being edited in the builder; null = creating a new one. */
+  editingZoneId: string | null;
 
   setCodexOpen: (open: boolean) => void;
   setCodexTab: (tab: EntityKind | 'notes') => void;
@@ -373,6 +398,46 @@ interface AuraV2State {
   updatePin: (storyId: string, pinId: string, updates: Partial<Omit<Pin, 'id'>>) => void;
   removePin: (storyId: string, pinId: string) => void;
 
+  /* Pin set actions */
+  /** Snapshot the current docked + AI-context arrangement as a new named set (becomes active). */
+  createPinSet: (storyId: string, name: string) => string;
+  /** Re-apply a set's docked + inContext flags across the pin pool and make it active. */
+  applyPinSet: (storyId: string, setId: string) => void;
+  renamePinSet: (storyId: string, setId: string, name: string) => void;
+  duplicatePinSet: (storyId: string, setId: string) => string;
+  removePinSet: (storyId: string, setId: string) => void;
+  /** Clear the active-set marker without touching pins (setId always null here). */
+  setActivePinSet: (storyId: string, setId: string | null) => void;
+
+  /* Context Zone actions */
+  setZoneBuilderOpen: (open: boolean) => void;
+  /** Open the builder to edit an existing zone (or create when id is null). */
+  openZoneBuilder: (zoneId: string | null) => void;
+  addZone: (storyId: string, zone: Omit<ContextZone, 'id' | 'createdAt' | 'updatedAt'>) => string;
+  updateZone: (storyId: string, zoneId: string, updates: Partial<Omit<ContextZone, 'id'>>) => void;
+  removeZone: (storyId: string, zoneId: string) => void;
+
+  /* Assistant thread actions */
+  /** Return the active thread id for a story, creating a first thread if needed. */
+  ensureActiveThread: (storyId: string) => string;
+  createThread: (storyId: string, name?: string) => string;
+  renameThread: (storyId: string, threadId: string, name: string) => void;
+  removeThread: (storyId: string, threadId: string) => void;
+  setActiveThread: (storyId: string, threadId: string) => void;
+  /** Append a turn to a thread; returns the new turn's id. */
+  addTurn: (storyId: string, threadId: string, turn: Omit<ChatTurn, 'id' | 'createdAt'>) => string;
+  /** Append a fresh generation (swipe) to a turn and make it active. */
+  appendVariant: (storyId: string, threadId: string, turnId: string, text: string) => void;
+  /** Switch which variant of a turn is shown. */
+  setActiveVariant: (storyId: string, threadId: string, turnId: string, index: number) => void;
+  /** Drop a turn and everything after it (used when a send fails before commit). */
+  removeTurnsFrom: (storyId: string, threadId: string, turnId: string) => void;
+
+  /* Cowriting preset actions (custom presets only; built-ins live in code) */
+  addCowritePreset: (preset: Omit<CowritePreset, 'id' | 'createdAt' | 'updatedAt'>) => string;
+  updateCowritePreset: (id: string, updates: Partial<Omit<CowritePreset, 'id'>>) => void;
+  removeCowritePreset: (id: string) => void;
+
   /* Annotation actions */
   addAnnotation: (storyId: string, annotation: Omit<Annotation, 'id' | 'createdAt' | 'updatedAt'>) => void;
   updateAnnotation: (storyId: string, annotationId: string, updates: Partial<Omit<Annotation, 'id'>>) => void;
@@ -397,6 +462,15 @@ const pruneStories = <T,>(map: Record<string, T>, keep: string[]): Record<string
   return out;
 };
 
+/** Keep the active set a faithful mirror of the live docked/inContext flags,
+ *  so any toggle the reader makes (including the AI-context Bot button) is
+ *  captured in the set they're currently on. */
+const mirrorActiveSet = (sets: PinSet[], activeId: string, pins: Pin[]): PinSet[] => {
+  const docked = pins.filter(p => p.docked).map(p => p.id);
+  const inContext = pins.filter(p => p.inContext).map(p => p.id);
+  return sets.map(s => (s.id === activeId ? { ...s, docked, inContext, updatedAt: Date.now() } : s));
+};
+
 export const useAuraV2Store = create<AuraV2State>()(
   persist(
     (set, get) => ({
@@ -410,6 +484,12 @@ export const useAuraV2Store = create<AuraV2State>()(
       sheetsByStory: {},
       annotationsByStory: {},
       pinsByStory: {},
+      pinSetsByStory: {},
+      activePinSetByStory: {},
+      zonesByStory: {},
+      chatThreadsByStory: {},
+      activeThreadByStory: {},
+      cowritePresets: [],
 
       codexEnabled: true,
       codexUseAI: false,
@@ -424,6 +504,8 @@ export const useAuraV2Store = create<AuraV2State>()(
       sheetsOpen: false,
       currentSheetId: null,
       pinDockOpen: true,
+      zoneBuilderOpen: false,
+      editingZoneId: null,
 
       setCodexOpen: (codexOpen) => set({ codexOpen, ...(codexOpen ? {} : { codexFocusId: null }) }),
       setCodexTab: (codexTab) => set({ codexTab }),
@@ -653,19 +735,35 @@ export const useAuraV2Store = create<AuraV2State>()(
           createdAt: Date.now(),
         };
         const touched = [storyId, ...Object.keys(get().pinsByStory).filter(k => k !== storyId)];
-        set({
-          pinsByStory: pruneStories({ ...get().pinsByStory, [storyId]: [...list, next] }, touched),
-        });
+        const nextList = [...list, next];
+        const patch: Partial<AuraV2State> = {
+          pinsByStory: pruneStories({ ...get().pinsByStory, [storyId]: nextList }, touched),
+        };
+        const activeId = get().activePinSetByStory[storyId];
+        if (activeId) {
+          patch.pinSetsByStory = {
+            ...get().pinSetsByStory,
+            [storyId]: mirrorActiveSet(get().pinSetsByStory[storyId] ?? [], activeId, nextList),
+          };
+        }
+        set(patch);
       },
       updatePin: (storyId, pinId, updates) => {
         const list = get().pinsByStory[storyId];
         if (!list) return;
-        set({
-          pinsByStory: {
-            ...get().pinsByStory,
-            [storyId]: list.map(p => (p.id === pinId ? { ...p, ...updates } : p)),
-          },
-        });
+        const nextList = list.map(p => (p.id === pinId ? { ...p, ...updates } : p));
+        const patch: Partial<AuraV2State> = {
+          pinsByStory: { ...get().pinsByStory, [storyId]: nextList },
+        };
+        // A change to what's shown or fed to the AI flows into the active set.
+        const activeId = get().activePinSetByStory[storyId];
+        if (activeId && ('docked' in updates || 'inContext' in updates)) {
+          patch.pinSetsByStory = {
+            ...get().pinSetsByStory,
+            [storyId]: mirrorActiveSet(get().pinSetsByStory[storyId] ?? [], activeId, nextList),
+          };
+        }
+        set(patch);
       },
       removePin: (storyId, pinId) => {
         const list = get().pinsByStory[storyId];
@@ -673,7 +771,274 @@ export const useAuraV2Store = create<AuraV2State>()(
         const next = list.filter(p => p.id !== pinId);
         const all = { ...get().pinsByStory, [storyId]: next };
         if (next.length === 0) delete all[storyId];
-        set({ pinsByStory: all });
+        const patch: Partial<AuraV2State> = { pinsByStory: all };
+        // Drop the deleted pin from every set so stale ids can't linger.
+        const sets = get().pinSetsByStory[storyId];
+        if (sets?.some(s => s.docked.includes(pinId) || s.inContext.includes(pinId))) {
+          patch.pinSetsByStory = {
+            ...get().pinSetsByStory,
+            [storyId]: sets.map(s => ({
+              ...s,
+              docked: s.docked.filter(id => id !== pinId),
+              inContext: s.inContext.filter(id => id !== pinId),
+            })),
+          };
+        }
+        set(patch);
+      },
+
+      createPinSet: (storyId, name) => {
+        const sets = get().pinSetsByStory[storyId] ?? [];
+        if (sets.length >= MAX_PIN_SETS_PER_STORY) return '';
+        const pins = get().pinsByStory[storyId] ?? [];
+        const now = Date.now();
+        const next: PinSet = {
+          id: newId(),
+          name: name.trim() || `Set ${sets.length + 1}`,
+          docked: pins.filter(p => p.docked).map(p => p.id),
+          inContext: pins.filter(p => p.inContext).map(p => p.id),
+          createdAt: now,
+          updatedAt: now,
+        };
+        set({
+          pinSetsByStory: { ...get().pinSetsByStory, [storyId]: [...sets, next] },
+          activePinSetByStory: { ...get().activePinSetByStory, [storyId]: next.id },
+        });
+        return next.id;
+      },
+      applyPinSet: (storyId, setId) => {
+        const target = (get().pinSetsByStory[storyId] ?? []).find(s => s.id === setId);
+        if (!target) return;
+        const list = get().pinsByStory[storyId];
+        const patch: Partial<AuraV2State> = {
+          activePinSetByStory: { ...get().activePinSetByStory, [storyId]: setId },
+        };
+        if (list) {
+          patch.pinsByStory = {
+            ...get().pinsByStory,
+            [storyId]: list.map(p => ({
+              ...p,
+              docked: target.docked.includes(p.id),
+              inContext: target.inContext.includes(p.id),
+            })),
+          };
+        }
+        set(patch);
+      },
+      renamePinSet: (storyId, setId, name) => {
+        const sets = get().pinSetsByStory[storyId];
+        if (!sets) return;
+        set({
+          pinSetsByStory: {
+            ...get().pinSetsByStory,
+            [storyId]: sets.map(s => (s.id === setId ? { ...s, name: name.trim() || s.name, updatedAt: Date.now() } : s)),
+          },
+        });
+      },
+      duplicatePinSet: (storyId, setId) => {
+        const sets = get().pinSetsByStory[storyId] ?? [];
+        const src = sets.find(s => s.id === setId);
+        if (!src || sets.length >= MAX_PIN_SETS_PER_STORY) return '';
+        const now = Date.now();
+        const copy: PinSet = {
+          ...src,
+          id: newId(),
+          name: `${src.name} copy`,
+          docked: [...src.docked],
+          inContext: [...src.inContext],
+          createdAt: now,
+          updatedAt: now,
+        };
+        set({ pinSetsByStory: { ...get().pinSetsByStory, [storyId]: [...sets, copy] } });
+        return copy.id;
+      },
+      removePinSet: (storyId, setId) => {
+        const sets = get().pinSetsByStory[storyId];
+        if (!sets) return;
+        const nextSets = sets.filter(s => s.id !== setId);
+        const setsMap = { ...get().pinSetsByStory, [storyId]: nextSets };
+        if (nextSets.length === 0) delete setsMap[storyId];
+        const active = { ...get().activePinSetByStory };
+        if (active[storyId] === setId) delete active[storyId];
+        set({ pinSetsByStory: setsMap, activePinSetByStory: active });
+      },
+      setActivePinSet: (storyId, setId) => {
+        const active = { ...get().activePinSetByStory };
+        if (setId) active[storyId] = setId;
+        else delete active[storyId];
+        set({ activePinSetByStory: active });
+      },
+
+      setZoneBuilderOpen: (zoneBuilderOpen) =>
+        set({ zoneBuilderOpen, ...(zoneBuilderOpen ? {} : { editingZoneId: null }) }),
+      openZoneBuilder: (editingZoneId) => set({ editingZoneId, zoneBuilderOpen: true }),
+      addZone: (storyId, zone) => {
+        const now = Date.now();
+        const next: ContextZone = { ...zone, id: newId(), createdAt: now, updatedAt: now };
+        const list = [...(get().zonesByStory[storyId] ?? []), next].slice(-MAX_ZONES_PER_STORY);
+        const touched = [storyId, ...Object.keys(get().zonesByStory).filter(k => k !== storyId)];
+        set({
+          zonesByStory: pruneStories({ ...get().zonesByStory, [storyId]: list }, touched),
+        });
+        return next.id;
+      },
+      updateZone: (storyId, zoneId, updates) => {
+        const list = get().zonesByStory[storyId];
+        if (!list) return;
+        set({
+          zonesByStory: {
+            ...get().zonesByStory,
+            [storyId]: list.map(z =>
+              z.id === zoneId ? { ...z, ...updates, updatedAt: Date.now() } : z),
+          },
+        });
+      },
+      removeZone: (storyId, zoneId) => {
+        const list = get().zonesByStory[storyId];
+        if (!list) return;
+        const next = list.filter(z => z.id !== zoneId);
+        const all = { ...get().zonesByStory, [storyId]: next };
+        if (next.length === 0) delete all[storyId];
+        set({ zonesByStory: all });
+      },
+
+      ensureActiveThread: (storyId) => {
+        const threads = get().chatThreadsByStory[storyId] ?? [];
+        const activeId = get().activeThreadByStory[storyId];
+        if (activeId && threads.some(t => t.id === activeId)) return activeId;
+        if (threads.length) {
+          set({ activeThreadByStory: { ...get().activeThreadByStory, [storyId]: threads[0].id } });
+          return threads[0].id;
+        }
+        return get().createThread(storyId);
+      },
+      createThread: (storyId, name) => {
+        const now = Date.now();
+        const existing = get().chatThreadsByStory[storyId] ?? [];
+        const thread: ChatThread = {
+          id: newId(),
+          name: name?.trim() || `Chat ${existing.length + 1}`,
+          turns: [],
+          createdAt: now,
+          updatedAt: now,
+        };
+        const list = [...existing, thread].slice(-MAX_THREADS_PER_STORY);
+        const touched = [storyId, ...Object.keys(get().chatThreadsByStory).filter(k => k !== storyId)];
+        set({
+          chatThreadsByStory: pruneStories({ ...get().chatThreadsByStory, [storyId]: list }, touched),
+          activeThreadByStory: { ...get().activeThreadByStory, [storyId]: thread.id },
+        });
+        return thread.id;
+      },
+      renameThread: (storyId, threadId, name) => {
+        const list = get().chatThreadsByStory[storyId];
+        if (!list) return;
+        set({
+          chatThreadsByStory: {
+            ...get().chatThreadsByStory,
+            [storyId]: list.map(t =>
+              t.id === threadId ? { ...t, name: name.trim() || t.name, updatedAt: Date.now() } : t),
+          },
+        });
+      },
+      removeThread: (storyId, threadId) => {
+        const list = get().chatThreadsByStory[storyId];
+        if (!list) return;
+        const next = list.filter(t => t.id !== threadId);
+        const threads = { ...get().chatThreadsByStory, [storyId]: next };
+        if (next.length === 0) delete threads[storyId];
+        const active = { ...get().activeThreadByStory };
+        if (active[storyId] === threadId) {
+          if (next.length) active[storyId] = next[next.length - 1].id;
+          else delete active[storyId];
+        }
+        set({ chatThreadsByStory: threads, activeThreadByStory: active });
+      },
+      setActiveThread: (storyId, threadId) =>
+        set({ activeThreadByStory: { ...get().activeThreadByStory, [storyId]: threadId } }),
+      addTurn: (storyId, threadId, turn) => {
+        const id = newId();
+        const full: ChatTurn = { ...turn, id, createdAt: Date.now() };
+        const list = get().chatThreadsByStory[storyId];
+        if (!list) return id;
+        set({
+          chatThreadsByStory: {
+            ...get().chatThreadsByStory,
+            [storyId]: list.map(t =>
+              t.id === threadId
+                ? { ...t, turns: [...t.turns, full].slice(-MAX_TURNS_PER_THREAD), updatedAt: Date.now() }
+                : t),
+          },
+        });
+        return id;
+      },
+      appendVariant: (storyId, threadId, turnId, text) => {
+        const list = get().chatThreadsByStory[storyId];
+        if (!list) return;
+        set({
+          chatThreadsByStory: {
+            ...get().chatThreadsByStory,
+            [storyId]: list.map(t =>
+              t.id === threadId
+                ? {
+                    ...t, updatedAt: Date.now(),
+                    turns: t.turns.map(tr =>
+                      tr.id === turnId
+                        ? { ...tr, variants: [...tr.variants, text], activeVariant: tr.variants.length }
+                        : tr),
+                  }
+                : t),
+          },
+        });
+      },
+      setActiveVariant: (storyId, threadId, turnId, index) => {
+        const list = get().chatThreadsByStory[storyId];
+        if (!list) return;
+        set({
+          chatThreadsByStory: {
+            ...get().chatThreadsByStory,
+            [storyId]: list.map(t =>
+              t.id === threadId
+                ? {
+                    ...t,
+                    turns: t.turns.map(tr =>
+                      tr.id === turnId && index >= 0 && index < tr.variants.length
+                        ? { ...tr, activeVariant: index }
+                        : tr),
+                  }
+                : t),
+          },
+        });
+      },
+      removeTurnsFrom: (storyId, threadId, turnId) => {
+        const list = get().chatThreadsByStory[storyId];
+        if (!list) return;
+        set({
+          chatThreadsByStory: {
+            ...get().chatThreadsByStory,
+            [storyId]: list.map(t => {
+              if (t.id !== threadId) return t;
+              const idx = t.turns.findIndex(tr => tr.id === turnId);
+              return idx === -1 ? t : { ...t, turns: t.turns.slice(0, idx), updatedAt: Date.now() };
+            }),
+          },
+        });
+      },
+
+      addCowritePreset: (preset) => {
+        const now = Date.now();
+        const next: CowritePreset = { ...preset, builtIn: false, id: newId(), createdAt: now, updatedAt: now };
+        set({ cowritePresets: [...get().cowritePresets, next] });
+        return next.id;
+      },
+      updateCowritePreset: (id, updates) => {
+        set({
+          cowritePresets: get().cowritePresets.map(p =>
+            (p.id === id && !p.builtIn ? { ...p, ...updates, updatedAt: Date.now() } : p)),
+        });
+      },
+      removeCowritePreset: (id) => {
+        set({ cowritePresets: get().cowritePresets.filter(p => p.id !== id) });
       },
 
       addAnnotation: (storyId, annotation) => {
@@ -731,6 +1096,12 @@ export const useAuraV2Store = create<AuraV2State>()(
         sheetsByStory: s.sheetsByStory,
         annotationsByStory: s.annotationsByStory,
         pinsByStory: s.pinsByStory,
+        pinSetsByStory: s.pinSetsByStory,
+        activePinSetByStory: s.activePinSetByStory,
+        zonesByStory: s.zonesByStory,
+        chatThreadsByStory: s.chatThreadsByStory,
+        activeThreadByStory: s.activeThreadByStory,
+        cowritePresets: s.cowritePresets,
         codexEnabled: s.codexEnabled,
         codexUseAI: s.codexUseAI,
         codexHighlight: s.codexHighlight,

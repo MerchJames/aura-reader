@@ -207,31 +207,62 @@ const PinCard = ({
  * "N pins" chip. Pins that have been dragged out float free at their own
  * position; the rest live in the dock column.
  */
+/** Compact set switcher shown beside the dock chip — swap saved views while
+ *  reading without opening the Sheets panel. */
+const DockSetSwitcher = ({ storyId }: { storyId: string }) => {
+  const sets = useAuraV2Store(s => s.pinSetsByStory[storyId]);
+  const activeId = useAuraV2Store(s => s.activePinSetByStory[storyId] ?? '');
+  const applyPinSet = useAuraV2Store(s => s.applyPinSet);
+  const setActivePinSet = useAuraV2Store(s => s.setActivePinSet);
+  if (!sets || sets.length === 0) return null;
+
+  return (
+    <select
+      value={activeId}
+      onChange={(e) => (e.target.value ? applyPinSet(storyId, e.target.value) : setActivePinSet(storyId, null))}
+      title="Switch pin set — restores which pins are shown and which are in AI context"
+      className="max-w-[9rem] px-2 py-1.5 rounded-full bg-surface/95 border border-app-border shadow-md text-[11px] font-medium opacity-70 hover:opacity-100 focus:opacity-100 transition-opacity cursor-pointer"
+    >
+      <option value="">No set</option>
+      {sets.map(s => (
+        <option key={s.id} value={s.id}>{s.name}</option>
+      ))}
+    </select>
+  );
+};
+
 export const PinDock = () => {
   const story = useAppStore(s => s.currentStory);
   const screen = useAppStore(s => s.screen);
   const pins = useAuraV2Store(s => (story ? s.pinsByStory[story.id] : undefined));
+  const hasSets = useAuraV2Store(s => (story ? (s.pinSetsByStory[story.id]?.length ?? 0) > 0 : false));
   const dockOpen = useAuraV2Store(s => s.pinDockOpen);
   const setPinDockOpen = useAuraV2Store(s => s.setPinDockOpen);
 
   if (screen !== 'reader' || !story) return null;
   const docked = (pins ?? []).filter(p => p.docked);
-  if (docked.length === 0) return null;
+  // Keep the control cluster mounted whenever there are pins or sets — an
+  // active set can legitimately hide every pin, and the switcher is how you
+  // get them back.
+  if (docked.length === 0 && !hasSets) return null;
 
   const column = docked.filter(p => p.x == null);
   const floating = docked.filter(p => p.x != null);
 
   return (
     <>
-      <div className="fixed right-4 top-20 z-50 pointer-events-auto">
-        <button
-          onClick={() => setPinDockOpen(!dockOpen)}
-          title={dockOpen ? 'Hide all pins' : 'Show all pins'}
-          className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-full bg-surface/95 border border-app-border shadow-md text-[11px] font-medium opacity-70 hover:opacity-100 transition-opacity"
-        >
-          {dockOpen ? <PanelRightClose size={13} /> : <PanelRightOpen size={13} />}
-          {docked.length} pin{docked.length === 1 ? '' : 's'}
-        </button>
+      <div className="fixed right-4 top-20 z-50 pointer-events-auto flex items-center gap-1.5">
+        <DockSetSwitcher storyId={story.id} />
+        {docked.length > 0 && (
+          <button
+            onClick={() => setPinDockOpen(!dockOpen)}
+            title={dockOpen ? 'Hide all pins' : 'Show all pins'}
+            className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-full bg-surface/95 border border-app-border shadow-md text-[11px] font-medium opacity-70 hover:opacity-100 transition-opacity"
+          >
+            {dockOpen ? <PanelRightClose size={13} /> : <PanelRightOpen size={13} />}
+            {docked.length} pin{docked.length === 1 ? '' : 's'}
+          </button>
+        )}
       </div>
       {dockOpen && column.length > 0 && (
         <div className="fixed right-4 top-[6.5rem] bottom-28 z-40 w-80 max-w-[85vw] flex flex-col gap-2 pointer-events-none">

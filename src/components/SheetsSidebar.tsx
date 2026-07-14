@@ -1,6 +1,6 @@
 import React, { useMemo, useState, useTransition } from 'react';
 import {
-  Bot, Check, ChevronLeft, FileSpreadsheet, Loader2, PanelRight, Pin, Plus, Sparkles, Table2, Trash2, X,
+  Bot, Check, ChevronLeft, Copy, FileSpreadsheet, Layers, Loader2, PanelRight, Pin, Plus, Sparkles, Table2, Trash2, X,
 } from 'lucide-react';
 import { useAppStore } from '../store';
 import { committedCount, flatMessages, useAuraV2Store } from '../stores/useAuraV2Store';
@@ -101,6 +101,102 @@ const parseFindings = (reply: string): Finding[] | null => {
   } catch {
     return null;
   }
+};
+
+const NO_SETS: import('../types').PinSet[] = [];
+
+/**
+ * Named, swappable pin arrangements ("saved views"). Saving a set snapshots
+ * which pins are docked and which are flagged for AI context; clicking a set
+ * re-applies both across the shared pin pool. While a set is active, any pin
+ * or Bot-button toggle flows straight back into it (see the store's
+ * mirrorActiveSet), so a set always reflects your latest choices.
+ */
+const PinSetBar = ({ storyId }: { storyId: string }) => {
+  const sets = useAuraV2Store(s => s.pinSetsByStory[storyId] ?? NO_SETS);
+  const activeId = useAuraV2Store(s => s.activePinSetByStory[storyId] ?? null);
+  const createPinSet = useAuraV2Store(s => s.createPinSet);
+  const applyPinSet = useAuraV2Store(s => s.applyPinSet);
+  const renamePinSet = useAuraV2Store(s => s.renamePinSet);
+  const duplicatePinSet = useAuraV2Store(s => s.duplicatePinSet);
+  const removePinSet = useAuraV2Store(s => s.removePinSet);
+  const setActivePinSet = useAuraV2Store(s => s.setActivePinSet);
+
+  const saveCurrent = () => {
+    const name = window.prompt('Name this pin set:', `Set ${sets.length + 1}`);
+    if (name !== null) createPinSet(storyId, name);
+  };
+
+  return (
+    <div className="space-y-1.5">
+      <div className="flex items-center justify-between">
+        <p className="text-[10px] font-bold uppercase tracking-wider text-muted flex items-center gap-1.5">
+          <Layers size={11} /> Pin sets
+        </p>
+        <button
+          onClick={saveCurrent}
+          title="Save the current arrangement — which pins are docked and which are in AI context — as a new set"
+          className="flex items-center gap-1 text-[10px] font-medium text-muted hover:text-app-text px-1.5 py-0.5 rounded-md hover:bg-app-text/10"
+        >
+          <Plus size={11} /> Save current
+        </button>
+      </div>
+      {sets.length === 0 ? (
+        <p className="text-[11px] text-muted leading-snug">
+          Save your docked pins and AI-context picks as a named set, then swap between
+          sets anytime — switching restores both what's shown and what the AI sees.
+        </p>
+      ) : (
+        <div className="flex flex-wrap gap-1.5">
+          {sets.map(s => {
+            const active = s.id === activeId;
+            return (
+              <div
+                key={s.id}
+                className={cn(
+                  'group flex items-center rounded-full border text-[11px] transition-colors',
+                  active
+                    ? 'border-accent bg-accent/15 text-accent'
+                    : 'border-app-border bg-app-text/5 hover:bg-app-text/10',
+                )}
+              >
+                <button
+                  onClick={() => (active ? setActivePinSet(storyId, null) : applyPinSet(storyId, s.id))}
+                  onDoubleClick={() => {
+                    const name = window.prompt('Rename pin set:', s.name);
+                    if (name !== null) renamePinSet(storyId, s.id, name);
+                  }}
+                  title={`${s.docked.length} shown · ${s.inContext.length} in AI context${active ? ' — click to deactivate' : ''}\nDouble-click to rename`}
+                  className="pl-2.5 pr-1 py-1 font-medium max-w-[9rem] truncate"
+                >
+                  {s.name}
+                </button>
+                <span className="flex items-center gap-0.5 pr-1 text-[9px] opacity-70" title={`${s.inContext.length} pins fed to the AI`}>
+                  <Bot size={9} />{s.inContext.length}
+                </span>
+                <button
+                  onClick={() => duplicatePinSet(storyId, s.id)}
+                  title="Duplicate this set"
+                  className="p-0.5 opacity-0 group-hover:opacity-60 hover:!opacity-100"
+                >
+                  <Copy size={10} />
+                </button>
+                <button
+                  onClick={() => {
+                    if (window.confirm(`Delete pin set "${s.name}"? Your pins are kept.`)) removePinSet(storyId, s.id);
+                  }}
+                  title="Delete this set (pins are kept)"
+                  className="p-0.5 pr-1.5 opacity-0 group-hover:opacity-60 hover:!opacity-100 hover:!text-red-500"
+                >
+                  <X size={10} />
+                </button>
+              </div>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
 };
 
 export const SheetsSidebar = () => {
@@ -365,7 +461,9 @@ export const SheetsSidebar = () => {
         </>
       )}
 
-      <div className="border-t border-app-border p-3 space-y-1.5 max-h-60 overflow-y-auto">
+      <div className="border-t border-app-border p-3 space-y-1.5 max-h-72 overflow-y-auto">
+        <PinSetBar storyId={story.id} />
+        <div className="h-px bg-app-border/60 my-1" />
         <p className="text-[10px] font-bold uppercase tracking-wider text-muted flex items-center gap-1.5">
           <Pin size={11} /> Pinned visuals
         </p>

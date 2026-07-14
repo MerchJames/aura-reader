@@ -21,6 +21,8 @@ export interface Message {
   swipes?: string[];
   /** SillyTavern narrator / `/hide`-den entry — shown, but visually marked. */
   hidden?: boolean;
+  /** Force a new chain (page) to begin at this message — used for document chapters. */
+  startsChain?: boolean;
 }
 
 export interface ChainStarSettings {
@@ -36,7 +38,7 @@ export interface Chain {
   starSettings?: ChainStarSettings;
 }
 
-export type StoryFormat = 'sillytavern' | 'kobold' | 'card';
+export type StoryFormat = 'sillytavern' | 'kobold' | 'card' | 'document';
 
 export interface Highlight {
   id: string;
@@ -187,6 +189,138 @@ export interface Sheet {
   updatedAt: number;
 }
 
+/**
+ * A named, saved AI-context selection: specific messages plus, optionally,
+ * the full set of alternate versions (branchlines/swipes) for chosen messages.
+ * Persisted per story so the reader can reuse a curated context across sessions.
+ */
+export interface ContextZone {
+  id: string;
+  name: string;
+  /** Messages whose current content is included, kept in reading order at build time. */
+  messageIds: string[];
+  /** Messages whose ALL alternate versions (swipes) are included. */
+  branchlineIds: string[];
+  createdAt: number;
+  updatedAt: number;
+}
+
+/**
+ * One turn in an assistant conversation. Assistant turns can carry several
+ * alternate generations (swipes); the reader cycles between them and can
+ * regenerate for more. User turns always hold exactly one variant.
+ */
+export interface ChatTurn {
+  id: string;
+  role: 'user' | 'assistant';
+  /** Alternate generations for this turn (>=1). */
+  variants: string[];
+  /** Index of the variant currently shown. */
+  activeVariant: number;
+  createdAt: number;
+  /** Context descriptor captured at send time, for display (e.g. "Up to here"). */
+  scopeLabel?: string;
+  /** When set, this turn is a Lens rewrite of that message; variants are drafts of it. */
+  lensTargetId?: string;
+  /** The revision instruction that produced a Lens turn (so it can be regenerated). */
+  lensInstruction?: string;
+  /** When set, this turn was produced by a cowriting preset; the resolved recipe
+   *  is kept so it can be regenerated (swiped) with the same placement. */
+  cowriteSpec?: CowriteRunSpec;
+}
+
+/**
+ * What a cowriting preset does with the branches it is handed. Governs the
+ * wording of the candidate block and a small system nudge — 'compare' ranks
+ * them, 'blend' fuses them, 'freeform' just presents them for the instruction.
+ */
+export type CowriteKind = 'compare' | 'blend' | 'freeform';
+
+/**
+ * A reusable cowriting recipe. It is position-independent — it describes a
+ * *policy* (how much prior context to ground on, whether to anchor an earlier
+ * passage, what to ask), not fixed message ids. The concrete branches and
+ * anchors are chosen at send time and captured in a CowriteRunSpec.
+ *
+ * Placement follows the "lost in the middle" rule: the reference grounds the
+ * model in the system block, the candidate branches ride the high-attention
+ * tail inside the final user turn, and the instruction is the very last line.
+ */
+export interface CowritePreset {
+  id: string;
+  name: string;
+  /** Built-ins ship in code and can't be deleted (only duplicated to customize). */
+  builtIn?: boolean;
+  kind: CowriteKind;
+  /** How many messages before the current one to include as grounding (0 = none). */
+  referenceLastN: number;
+  /** Whether this preset expects an anchored earlier passage, picked at send time. */
+  useAnchor: boolean;
+  /** The ask, placed dead last in the payload. */
+  instruction: string;
+  createdAt: number;
+  updatedAt: number;
+}
+
+/** One hand-picked candidate branch: a message and which of its versions to include. */
+export interface CowriteCandidate {
+  messageId: string;
+  /** Specific swipe indices to include; empty = all versions of that message. */
+  versions: number[];
+}
+
+/**
+ * The resolved, position-locked inputs to a single cowrite generation, stored
+ * on the produced turn so "regenerate" rebuilds the identical payload. Content
+ * is resolved live from these ids at build time (so Lens edits stay reflected).
+ */
+export interface CowriteRunSpec {
+  presetName: string;
+  kind: CowriteKind;
+  /** Reference message ids (anchors + the last-N window), in reading order. */
+  referenceIds: string[];
+  candidates: CowriteCandidate[];
+  instruction: string;
+}
+
+/** A saved, named conversation branch with the reading assistant, scoped to a story. */
+export interface ChatThread {
+  id: string;
+  name: string;
+  turns: ChatTurn[];
+  createdAt: number;
+  updatedAt: number;
+}
+
+/**
+ * Advanced generation controls for the AI assistant. Kept behind a collapsed
+ * "Advanced" section — most readers never touch it. `null` on a sampler means
+ * "omit it and let the server decide". Extended samplers (top_k / min_p /
+ * repetition_penalty) are non-standard: only sent when `extendedSamplers` is on,
+ * since strict OpenAI-compatible endpoints reject unknown fields.
+ */
+export interface AiAdvancedConfig {
+  /** Stream tokens as they arrive rather than waiting for the whole reply. */
+  streaming: boolean;
+  /** Extra system instruction prepended ahead of the story context. */
+  systemPrompt: string;
+  /** Optional wrapper for the assembled context body; `{{content}}` is substituted. */
+  contextTemplate: string;
+  /** Target context budget in tokens (0 = only the hard safety ceiling applies). */
+  contextSize: number;
+  /** Max output tokens (0 = omit, server default). */
+  maxTokens: number;
+  /** Send top_k / min_p / repetition_penalty (for local backends that accept them). */
+  extendedSamplers: boolean;
+  temperature: number | null;
+  topP: number | null;
+  topK: number | null;
+  minP: number | null;
+  repetitionPenalty: number | null;
+  frequencyPenalty: number | null;
+  presencePenalty: number | null;
+}
+
 /** Per-word streaming text effect, independent of the block reveal animation. */
 export type StreamEffect = 'none' | 'fade' | 'blur' | 'ink' | 'glitch' | 'rise';
 
@@ -215,6 +349,25 @@ export interface Pin {
   x?: number;
   y?: number;
   createdAt: number;
+}
+
+/**
+ * A named, swappable arrangement of pins ("saved view"). Pins live in one
+ * shared pool per story; a set just records which pin ids are docked (shown
+ * in the margin) and which are fed to the AI as context. Applying a set
+ * re-applies those two flags across the pool — so a set also captures the
+ * AI-context choices made with the Bot button. Non-destructive: deleting a
+ * set never deletes pins, and a pin can belong to any number of sets.
+ */
+export interface PinSet {
+  id: string;
+  name: string;
+  /** Pin ids shown in the dock while this set is active. */
+  docked: string[];
+  /** Pin ids sent to the AI as reference while this set is active. */
+  inContext: string[];
+  createdAt: number;
+  updatedAt: number;
 }
 
 /** A reader note anchored to a specific passage (message + optional selected text). */
@@ -316,6 +469,8 @@ export interface AppConfig {
   aiBaseUrl: string;
   aiApiKey: string;
   aiModel: string;
+  /** Advanced generation controls (behind a collapsed section in the AI panel). */
+  aiAdvanced: AiAdvancedConfig;
 }
 
 export interface AppState extends AppConfig {
@@ -354,6 +509,8 @@ export interface AppState extends AppConfig {
   swipeSelections: Record<string, number>;
   /** AI assistant modal open (transient). */
   aiOpen: boolean;
+  /** Message id the reader asked to Lens-edit; opens the AI panel in edit mode (transient). */
+  lensEditTarget: string | null;
 
   savedConfigs: Record<string, AppConfig>;
 
@@ -455,6 +612,10 @@ export interface AppState extends AppConfig {
   setAiApiKey: (key: string) => void;
   setAiModel: (model: string) => void;
   setAiOpen: (open: boolean) => void;
+  /** Request a Lens edit for a message (opens the AI panel in edit mode); null clears it. */
+  setLensEditTarget: (messageId: string | null) => void;
+  /** Merge a partial patch into the advanced AI generation controls. */
+  setAiAdvanced: (patch: Partial<AiAdvancedConfig>) => void;
   selectSwipe: (messageId: string, index: number) => void;
   updateHighlight: (id: string, updates: Partial<Highlight>) => void;
 

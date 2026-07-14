@@ -229,6 +229,9 @@ export const ReaderDisplay = () => {
 
   const openNotes = useCallback((id: string) => setThreadOpen({ messageId: id }), []);
 
+  // Hand a message off to the AI assistant's Lens-edit mode.
+  const lensEdit = useCallback((id: string) => useAppStore.getState().setLensEditTarget(id), []);
+
   const pinContent = useCallback((messageId: string, content: string, format: PinFormat) => {
     const sid = useAppStore.getState().currentStory?.id;
     if (!sid) return;
@@ -367,6 +370,7 @@ export const ReaderDisplay = () => {
         noteCount={noteCounts.get(msg.id) ?? 0}
         onOpenNotes={openNotes}
         onPinContent={pinContent}
+        onLensEdit={store.aiBaseUrl && store.aiModel ? lensEdit : undefined}
         streamEffect={store.streamEffect}
         isStreamingMsg={isStreamingMsg}
         isMsgZoomed={isMsgZoomed}

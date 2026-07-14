@@ -341,15 +341,151 @@ export const parseCompanionCard = async (file: File): Promise<ParsedCard> => {
 };
 
 /* ------------------------------------------------------------------ */
+/* Plain documents (.txt, .md) and Word (.docx)                        */
+/* ------------------------------------------------------------------ */
+
+// "Chapter 3", "Part IV", "Act Two" — a section word followed by a number/word.
+const CHAPTER_RE = /^(chapter|part|book|act|scene)\s+([0-9]+|[ivxlcdm]+|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|thirteen|fourteen|fifteen|twenty)\b/i;
+// Standalone section words that need no number.
+const SECTION_RE = /^(prologue|epilogue|interlude|foreword|introduction|afterword)\b/i;
+
+/** True for a short standalone line that reads like a chapter/section heading. */
+const isHeading = (block: string): boolean => {
+  const line = block.trim();
+  if (/^#{1,6}\s+\S/.test(line)) return true; // markdown heading
+  if (line.includes('\n') || line.length > 52) return false; // paragraphs aren't headings
+  // A real heading isn't a sentence, so it shouldn't end in sentence punctuation.
+  if (/[.!?,;:]$/.test(line)) return false;
+  return CHAPTER_RE.test(line) || SECTION_RE.test(line);
+};
+
+/** Normalize a heading block to markdown (H2) so it renders as a chapter title. */
+const asHeadingMarkdown = (block: string): string => {
+  const line = block.trim();
+  return /^#{1,6}\s+/.test(line) ? line : `## ${line}`;
+};
+
+/** Paragraphs per page when a document has no detectable chapters. */
+const FALLBACK_CHAPTER_SIZE = 30;
+
+/**
+ * Segment prose (plain text or markdown) into messages — one per paragraph —
+ * with chapter headings starting new chains (pages). When no chapters exist,
+ * fall back to fixed-size grouping so pagination and streaming still get
+ * sensible page breaks. Content stays markdown, so it flows through the same
+ * formatting/theming pipeline as every other story.
+ */
+export const segmentProse = (raw: string, fileName: string): ParsedStory => {
+  const blocks = raw
+    .replace(/\r\n/g, '\n')
+    .replace(/\r/g, '\n')
+    .split(/\n\s*\n/)
+    .map(b => b.trim())
+    .filter(Boolean);
+
+  const hasHeadings = blocks.some(isHeading);
+  const messages: Message[] = [];
+  let firstHeading: string | undefined;
+  let sinceBreak = 0;
+
+  blocks.forEach((block, i) => {
+    const heading = isHeading(block);
+    const content = heading ? asHeadingMarkdown(block) : block;
+    if (heading && !firstHeading) firstHeading = content.replace(/^#{1,6}\s+/, '').trim();
+
+    const forcedBreak = !hasHeadings && sinceBreak >= FALLBACK_CHAPTER_SIZE;
+    const startsChain = i === 0 || heading || forcedBreak;
+    sinceBreak = startsChain ? 0 : sinceBreak + 1;
+
+    messages.push({
+      id: nextId('doc'),
+      role: 'ai',
+      name: '',
+      content,
+      startsChain: startsChain || undefined,
+    });
+  });
+
+  return {
+    title: firstHeading || stripExtension(fileName),
+    format: 'document',
+    messages,
+  };
+};
+
+/** Convert mammoth's HTML output to lightweight markdown for the reader. */
+const htmlToMarkdown = (html: string): string => {
+  const doc = new DOMParser().parseFromString(html, 'text/html');
+  const inline = (node: Node): string => {
+    if (node.nodeType === Node.TEXT_NODE) return node.textContent ?? '';
+    if (node.nodeType !== Node.ELEMENT_NODE) return '';
+    const el = node as HTMLElement;
+    const inner = Array.from(el.childNodes).map(inline).join('');
+    switch (el.tagName) {
+      case 'STRONG': case 'B': return inner.trim() ? `**${inner}**` : inner;
+      case 'EM': case 'I': return inner.trim() ? `*${inner}*` : inner;
+      case 'BR': return '\n';
+      default: return inner;
+    }
+  };
+  const out: string[] = [];
+  doc.body.childNodes.forEach(node => {
+    if (node.nodeType === Node.TEXT_NODE) {
+      const t = (node.textContent ?? '').trim();
+      if (t) out.push(t);
+      return;
+    }
+    if (node.nodeType !== Node.ELEMENT_NODE) return;
+    const el = node as HTMLElement;
+    const tag = el.tagName;
+    if (/^H[1-6]$/.test(tag)) {
+      const level = Math.min(3, Number(tag[1]));
+      const text = inline(el).trim();
+      if (text) out.push(`${'#'.repeat(level)} ${text}`);
+    } else if (tag === 'UL' || tag === 'OL') {
+      Array.from(el.querySelectorAll('li')).forEach((li, i) => {
+        const text = inline(li).trim();
+        if (text) out.push(`${tag === 'OL' ? `${i + 1}.` : '-'} ${text}`);
+      });
+    } else if (tag === 'BLOCKQUOTE') {
+      const text = inline(el).trim();
+      if (text) out.push(`> ${text}`);
+    } else {
+      const text = inline(el).trim();
+      if (text) out.push(text);
+    }
+  });
+  return out.join('\n\n');
+};
+
+export const parseDocx = async (file: File): Promise<ParsedStory> => {
+  const arrayBuffer = await file.arrayBuffer();
+  // Lazy-load the browser build so mammoth stays out of the main bundle.
+  const mod: any = await import('mammoth/mammoth.browser');
+  const mammoth = mod.default ?? mod;
+  const result = await mammoth.convertToHtml({ arrayBuffer });
+  const markdown = htmlToMarkdown(result.value || '');
+  const parsed = segmentProse(markdown, file.name);
+  if (parsed.messages.length === 0) throw new Error(`${file.name}: no readable text found in this document.`);
+  return parsed;
+};
+
+/* ------------------------------------------------------------------ */
 
 export const parseFile = async (file: File): Promise<ParsedStory> => {
   const lower = file.name.toLowerCase();
   if (lower.endsWith('.png')) {
     return parseTavernPNG(file);
   }
+  if (lower.endsWith('.docx')) {
+    return parseDocx(file);
+  }
   const text = await file.text();
   if (lower.endsWith('.jsonl')) {
     return parseSillyTavernText(text, file.name);
+  }
+  if (lower.endsWith('.txt') || lower.endsWith('.md') || lower.endsWith('.markdown')) {
+    return segmentProse(text, file.name);
   }
   if (lower.endsWith('.json')) {
     // Some ST exports use .json but are still line-delimited chats.
@@ -363,5 +499,5 @@ export const parseFile = async (file: File): Promise<ParsedStory> => {
     }
     return parseKoboldText(text, file.name);
   }
-  throw new Error('Unsupported file format. Load a .jsonl chat, .json save, or .png character card.');
+  throw new Error('Unsupported file format. Load a .jsonl chat, .json save, .txt/.md document, .docx, or .png character card.');
 };
