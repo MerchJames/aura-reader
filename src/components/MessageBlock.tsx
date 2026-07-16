@@ -11,6 +11,7 @@ import {
   Message,
   OocHandling,
   PinFormat,
+  SceneEmphasis,
   StatRule,
   StreamEffect,
   Theme,
@@ -23,6 +24,7 @@ import {
   processText,
   truncateToWord,
 } from '../utils/textProcessor';
+import { isShoutWord, normalizeWord } from '../utils/expressive';
 import { buildStatPanel, isBarStat, StatEntry } from '../utils/statFormatter';
 
 /** Strip markdown markers for a plain-text context preview. */
@@ -191,8 +193,14 @@ const wrapWords = (
   settled: number,
   style: string | null,
   delays: Map<number, number>,
+  expressive: boolean,
+  readingWord: number | null,
+  emphasis: Map<string, 'whisper' | 'shout'> | null,
 ): React.ReactNode => {
-  if (!style || WORD_REVEAL_CAP <= 0) return node;
+  // Nothing to do unless we're animating the streaming tail, dressing shouts,
+  // karaoke-highlighting the voice's word, or applying Director emphasis. When
+  // only `expressive` is on we wrap just the shout words, so it stays cheap.
+  if ((!style || WORD_REVEAL_CAP <= 0) && !expressive && readingWord == null && !emphasis) return node;
   if (typeof node === 'string') {
     if (!node.trim()) return node;
     const out: React.ReactNode[] = [];
@@ -202,24 +210,34 @@ const wrapWords = (
     while ((m = WORD_RE.exec(node))) {
       const word = m[0];
       const idx = counter.value++;
-      if (idx < settled) {
+      // Director emphasis (AI-judged) wins over the caps-only shout heuristic.
+      const dir = emphasis ? emphasis.get(normalizeWord(word)) : undefined;
+      const shout = dir === 'shout' || (expressive && isShoutWord(word));
+      const whisper = dir === 'whisper';
+      const reading = readingWord != null && idx === readingWord;
+      const inTail = !!style && idx >= settled && idx < settled + WORD_REVEAL_CAP;
+      if (!inTail && !shout && !whisper && !reading) {
+        // Ordinary settled/out-of-window word — emit as plain text.
         out.push(node.slice(cursor, m.index + word.length));
-      } else if (idx < settled + WORD_REVEAL_CAP) {
+      } else {
         if (m.index > cursor) out.push(node.slice(cursor, m.index));
-        if (!delays.has(idx)) {
+        if (inTail && !delays.has(idx)) {
           delays.set(idx, Math.min(counter.fresh++, WORD_REVEAL_MAX_BATCH) * WORD_REVEAL_STAGGER);
         }
         out.push(
           <span
             key={`w-${idx}`}
-            className={`word-reveal word-reveal-${style}`}
-            style={{ animationDelay: `${delays.get(idx)}ms` }}
+            className={cn(
+              inTail && `word-reveal word-reveal-${style}`,
+              shout && 'expr-shout',
+              whisper && 'expr-whisper',
+              reading && 'tts-reading',
+            )}
+            style={inTail ? { animationDelay: `${delays.get(idx)}ms` } : undefined}
           >
             {word}
           </span>,
         );
-      } else {
-        out.push(node.slice(cursor, m.index + word.length));
       }
       cursor = m.index + word.length;
     }
@@ -227,9 +245,27 @@ const wrapWords = (
     return out.length === 1 ? out[0] : out;
   }
   if (Array.isArray(node)) {
-    return node.map(n => wrapWords(n, counter, settled, style, delays));
+    return node.map(n => wrapWords(n, counter, settled, style, delays, expressive, readingWord, emphasis));
   }
   return node;
+};
+
+/** Word → emphasis-kind map from the Director's spans (verbatim substrings).
+ *  Beats are pacing, not visual, so only whisper/shout words are mapped. */
+const buildEmphasisMap = (
+  spans: SceneEmphasis[] | undefined,
+  on: boolean,
+): Map<string, 'whisper' | 'shout'> | null => {
+  if (!on || !spans || spans.length === 0) return null;
+  const map = new Map<string, 'whisper' | 'shout'>();
+  for (const s of spans) {
+    if (s.kind === 'beat') continue;
+    for (const w of s.text.split(/\s+/)) {
+      const n = normalizeWord(w);
+      if (n.length >= 2 && !map.has(n)) map.set(n, s.kind);
+    }
+  }
+  return map.size ? map : null;
 };
 
 export interface MessageBlockProps {
@@ -253,6 +289,12 @@ export interface MessageBlockProps {
   msgAnim: AnimationStyle;
   /** Per-word streaming effect (independent of the block reveal). */
   streamEffect: StreamEffect;
+  /** Kinetic typography — scale shouts and dress scene breaks. */
+  expressiveText: boolean;
+  /** TTS is actively narrating — karaoke-highlight the word at the reveal edge. */
+  ttsReading: boolean;
+  /** Scene Director emphasis spans for this message (whisper/shout/beat). */
+  emphasis?: SceneEmphasis[];
   theme: Theme;
   themeDef: ThemeDef;
   minimalBubbles: boolean;
@@ -311,6 +353,9 @@ const MessageContent = React.memo(({
   onSelectSwipe,
   markLore,
   onPinContent,
+  expressiveText,
+  ttsReading,
+  emphasis,
   settledCount,
   wordRevealStyle,
   wordDelays,
@@ -318,7 +363,8 @@ const MessageContent = React.memo(({
   | 'dialogueStyle' | 'dialogueAnimation' | 'hideMetadata' | 'oocHandling' | 'autoFormat'
   | 'autoFormatRules' | 'statRules' | 'paragraphSpacing' | 'dialogueOwnLine' | 'smartTypography'
   | 'styleQuotes' | 'substituteNames' | 'characterName' | 'userName' | 'showImages'
-  | 'swipeSelections' | 'onImageClick' | 'onSelectSwipe' | 'markLore' | 'onPinContent'> & {
+  | 'swipeSelections' | 'onImageClick' | 'onSelectSwipe' | 'markLore' | 'onPinContent'
+  | 'expressiveText' | 'ttsReading' | 'emphasis'> & {
     settledCount: number;
     wordRevealStyle: string | null;
     wordDelays: Map<number, number>;
@@ -345,6 +391,14 @@ const MessageContent = React.memo(({
       }).processedText;
 
   const counter: WordCounter = { value: 0, fresh: 0 };
+  // The word at the reveal edge is what the voice is narrating (the reveal is
+  // paced to the voice), so highlight it as a karaoke cue while TTS reads.
+  const readingWord = ttsReading && isStreamingMsg
+    ? Math.max(0, countWords(processedText) - 1)
+    : null;
+  // Director-supplied whisper/shout words (fall back to the caps heuristic when
+  // this passage hasn't been read by the Director).
+  const emphasisMap = buildEmphasisMap(emphasis, expressiveText);
 
   return (
     <div
@@ -367,20 +421,24 @@ const MessageContent = React.memo(({
         components={{
           p: ({ node: _node, children, ...props }) => (
             <p {...props}>
-              {wrapWords(markLore(children), counter, settledCount, wordRevealStyle, wordDelays)}
+              {wrapWords(markLore(children), counter, settledCount, wordRevealStyle, wordDelays, expressiveText, readingWord, emphasisMap)}
             </p>
           ),
           li: ({ node: _node, children, ...props }) => (
             <li {...props}>
-              {wrapWords(markLore(children), counter, settledCount, wordRevealStyle, wordDelays)}
+              {wrapWords(markLore(children), counter, settledCount, wordRevealStyle, wordDelays, expressiveText, readingWord, emphasisMap)}
             </li>
           ),
+          hr: ({ node: _node }) =>
+            expressiveText
+              ? <div className="scene-break" aria-hidden="true">✦ ✦ ✦</div>
+              : <hr />,
           em: ({ node: _node, ...props }) => {
             const dialogue = isDialogueText(textOf(props.children));
             if (!dialogue) {
               return (
                 <em className="italic opacity-90" {...props}>
-                  {wrapWords(markLore(props.children), counter, settledCount, wordRevealStyle, wordDelays)}
+                  {wrapWords(markLore(props.children), counter, settledCount, wordRevealStyle, wordDelays, expressiveText, readingWord, emphasisMap)}
                 </em>
               );
             }
@@ -404,8 +462,11 @@ const MessageContent = React.memo(({
             );
           },
           strong: ({ node: _node, ...props }) => (
-            <strong className="font-bold text-amber-600 dark:text-amber-400" {...props}>
-              {wrapWords(props.children, counter, settledCount, wordRevealStyle, wordDelays)}
+            <strong
+              className={cn('font-bold text-amber-600 dark:text-amber-400', expressiveText && 'expr-key')}
+              {...props}
+            >
+              {wrapWords(props.children, counter, settledCount, wordRevealStyle, wordDelays, expressiveText, readingWord, emphasisMap)}
             </strong>
           ),
           // AI-written tables get a hover pin — captured verbatim from the
@@ -555,6 +616,9 @@ const MessageContent = React.memo(({
     && prev.swipeSelections === next.swipeSelections
     && prev.markLore === next.markLore
     && prev.onPinContent === next.onPinContent
+    && prev.expressiveText === next.expressiveText
+    && prev.ttsReading === next.ttsReading
+    && prev.emphasis === next.emphasis
     && prev.settledCount === next.settledCount
     && prev.wordRevealStyle === next.wordRevealStyle
     && prev.wordDelays === next.wordDelays;
@@ -662,6 +726,7 @@ export const MessageBlock = React.memo((props: MessageBlockProps) => {
       <div
         key={msg.id}
         data-msg-id={msg.id}
+        data-role={msg.role}
         data-streaming={isStreamingMsg}
         data-zoomed={isMsgZoomed}
         ref={isStreamingMsg ? activeRef : undefined}
@@ -704,6 +769,7 @@ export const MessageBlock = React.memo((props: MessageBlockProps) => {
     <div
       key={msg.id}
       data-msg-id={msg.id}
+      data-role={msg.role}
       data-streaming={isStreamingMsg}
       data-zoomed={isMsgZoomed}
       ref={isStreamingMsg ? activeRef : undefined}
@@ -830,5 +896,7 @@ export const MessageBlock = React.memo((props: MessageBlockProps) => {
     && prev.substituteNames === next.substituteNames
     && prev.characterName === next.characterName
     && prev.userName === next.userName
-    && prev.showImages === next.showImages;
+    && prev.showImages === next.showImages
+    && prev.ttsReading === next.ttsReading
+    && prev.emphasis === next.emphasis;
 });

@@ -8,6 +8,7 @@ import { HIGHLIGHT_COLORS, Message, PinFormat } from '../types';
 import { paintHighlights } from '../utils/highlightPaint';
 import { resolveContent } from '../utils/lens';
 import { useEntityHighlighter } from './EntityTooltip';
+import { useSceneDirector } from '../hooks/useSceneDirector';
 import { motion, AnimatePresence } from 'motion/react';
 import { MessageBlock } from './MessageBlock';
 import { SelectionPopover } from './SelectionPopover';
@@ -36,6 +37,17 @@ export const ReaderDisplay = () => {
   // Codex lore words get a whisper-quiet underline + hover tooltip.
   // Identity function (zero cost) when the codex is off or still empty.
   const markLore = useEntityHighlighter();
+  // Hybrid Scene Director: auto-reads the current page while enabled.
+  useSceneDirector();
+
+  // Adaptive theming — the Director's read of the passage currently in focus
+  // tints the reading surface (mood → colour, tension → strength). The active
+  // passage is the streaming line, else the last one shown.
+  const activeSceneId = store.streamingMessage?.id
+    ?? store.visibleMessages[store.visibleMessages.length - 1]?.id;
+  const scene = store.sceneTheming && store.themeEffects && storyId && activeSceneId
+    ? v2.sceneByStory[storyId]?.[activeSceneId]
+    : undefined;
   const bottomRef = useRef<HTMLDivElement>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
   // The currently-streaming message element — the focus target that the
@@ -372,6 +384,9 @@ export const ReaderDisplay = () => {
         onPinContent={pinContent}
         onLensEdit={store.aiBaseUrl && store.aiModel ? lensEdit : undefined}
         streamEffect={store.streamEffect}
+        expressiveText={store.expressiveText}
+        ttsReading={store.ttsEnabled && store.ttsPending && isStreamingMsg}
+        emphasis={storyId ? v2.sceneByStory[storyId]?.[msg.id]?.emphasis : undefined}
         isStreamingMsg={isStreamingMsg}
         isMsgZoomed={isMsgZoomed}
         avatar={avatar}
@@ -418,12 +433,20 @@ export const ReaderDisplay = () => {
 
   return (
     <>
+    {scene && scene.mood !== 'neutral' && (
+      <div
+        className="scene-wash"
+        data-mood={scene.mood}
+        style={{ opacity: 0.15 + Math.max(0, Math.min(1, scene.tension)) * 0.25 }}
+        aria-hidden
+      />
+    )}
     <div
       ref={scrollRef}
       onScroll={handleScroll}
       onMouseUp={handleTextMouseUp}
       className={cn(
-        'flex-1 min-h-0 overflow-y-auto pb-44 transition-all duration-500',
+        'relative z-10 flex-1 min-h-0 overflow-y-auto pb-44 transition-all duration-500',
         store.isAutofocusMode && 'overflow-x-hidden pb-[45vh]',
       )}
       style={{ fontSize: `${store.fontSize * (store.isAutofocusMode ? store.autofocusZoom : 1)}px` }}
@@ -444,6 +467,10 @@ export const ReaderDisplay = () => {
       <div
         className={cn('reader-page mx-auto pt-8 px-4 min-h-[80vh]', maxWidth,
           `view-${store.viewMode}`,
+          // Expressive typography intensity drives shout/scene-break/key-line
+          // scaling through CSS vars; drop caps flag the opening of AI passages.
+          store.expressiveText && `expr-${store.expressiveIntensity}`,
+          store.dropCaps && 'drop-caps',
           (store.theme === 'book' || store.theme === 'essay') && 'py-12',
           store.theme === 'phone' && 'border-x border-app-border shadow-2xl min-h-screen pt-4 bg-app-bg',
         )}

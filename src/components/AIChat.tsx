@@ -6,7 +6,7 @@ import rehypeKatex from 'rehype-katex';
 import 'katex/dist/katex.min.css';
 import {
   Bot, Check, ChevronLeft, ChevronRight, Combine, Loader2, Pencil, Plus, RefreshCw,
-  Send, SlidersHorizontal, Sparkles, Square, Trash2, Wand2, X,
+  ScrollText, Send, SlidersHorizontal, Sparkles, Square, Trash2, Wand2, X,
 } from 'lucide-react';
 import { useAppStore } from '../store';
 import { useShallow } from 'zustand/react/shallow';
@@ -22,6 +22,7 @@ import { resolveContent } from '../utils/lens';
 import { buildCowritePayload } from '../utils/cowrite';
 import { ContextZoneBuilder } from './ContextZoneBuilder';
 import { CowritePanel } from './CowritePanel';
+import { SummarizePanel } from './SummarizePanel';
 import { AiAdvancedConfig, ChatTurn, CowriteRunSpec, Message } from '../types';
 
 type Scope = 'page' | 'here' | 'all' | 'swipes' | 'zones';
@@ -476,6 +477,7 @@ export const AIChat = () => {
   const [activeZoneId, setActiveZoneId] = useState<string>('');
   const [advancedOpen, setAdvancedOpen] = useState(false);
   const [cowriteOpen, setCowriteOpen] = useState(false);
+  const [summarizeOpen, setSummarizeOpen] = useState(false);
   const [renaming, setRenaming] = useState(false);
   const [renameValue, setRenameValue] = useState('');
   // Live streaming state for the in-flight assistant reply.
@@ -1162,6 +1164,15 @@ export const AIChat = () => {
                 onClose={() => setCowriteOpen(false)}
               />
             )}
+
+            {summarizeOpen && (
+              <SummarizePanel
+                base={resolvedBase || store.aiBaseUrl}
+                apiKey={store.aiApiKey}
+                model={store.aiModel}
+                onClose={() => setSummarizeOpen(false)}
+              />
+            )}
           </div>
 
           <div className="border-t border-app-border p-2.5 space-y-2">
@@ -1218,6 +1229,16 @@ export const AIChat = () => {
                   )}
                 >
                   <Combine size={15} />
+                </button>
+                <button
+                  onClick={() => setSummarizeOpen(v => !v)}
+                  title="Summarize the whole story into a versioned pin"
+                  className={cn(
+                    'p-1.5 rounded-md hover:bg-app-text/10',
+                    summarizeOpen ? 'text-accent bg-accent/10' : 'opacity-60 hover:opacity-100',
+                  )}
+                >
+                  <ScrollText size={15} />
                 </button>
                 <button
                   onClick={() => setAdvancedOpen(v => !v)}

@@ -1,7 +1,7 @@
 import React from 'react';
 import { create } from 'zustand';
 import { createJSONStorage, persist, StateStorage } from 'zustand/middleware';
-import { Annotation, Chain, ChatThread, ChatTurn, ContextZone, CowritePreset, Message, MessageOverride, Pin, PinSet, Sheet } from '../types';
+import { Annotation, Chain, ChatThread, ChatTurn, ContextZone, CowritePreset, Message, MessageOverride, Pin, PinSet, PinVersion, SceneDescriptor, Sheet } from '../types';
 import { useAppStore } from '../store';
 
 /**
@@ -280,6 +280,8 @@ const MAX_TRACKED_STORIES = 24;
 const MAX_OVERRIDES_PER_STORY = 500;
 const MAX_PINS_PER_STORY = 24;
 const MAX_PIN_SETS_PER_STORY = 30;
+/** Kept versions per pin (original is always preserved when trimming). */
+const MAX_PIN_VERSIONS = 12;
 /** Generous cap per pinned visual (~25k words) — big summary docs fit intact. */
 const MAX_PIN_CONTENT = 150_000;
 const MAX_ZONES_PER_STORY = 40;
@@ -325,6 +327,16 @@ interface AuraV2State {
 
   /* Cowriting presets — reusable, global (not per-story) draft-time recipes. */
   cowritePresets: CowritePreset[];
+
+  /* Scene Director — cached per-passage AI scene reading (persisted).
+     story → messageId → descriptor. See docs/SCENE_DIRECTOR.md. */
+  sceneByStory: Record<string, Record<string, SceneDescriptor>>;
+  /** Whether the Director pass is enabled for a story (opt-in, spends tokens). */
+  directorEnabledByStory: Record<string, boolean>;
+
+  /** The summary pin the agentic summarizer maintains per story (for versioning
+   *  across re-runs). Absent until the first summary is generated. */
+  summaryPinByStory: Record<string, string>;
 
   /* Codex preferences (persisted) */
   codexEnabled: boolean;
@@ -397,6 +409,11 @@ interface AuraV2State {
   addPin: (storyId: string, pin: Omit<Pin, 'id' | 'createdAt'>) => void;
   updatePin: (storyId: string, pinId: string, updates: Partial<Omit<Pin, 'id'>>) => void;
   removePin: (storyId: string, pinId: string) => void;
+  /** Append a new version (AI/manual) — seeds the current content as the
+   *  'original' the first time — and switches the pin to show it. */
+  addPinVersion: (storyId: string, pinId: string, version: Omit<PinVersion, 'createdAt'>) => void;
+  /** Switch which stored version the pin displays (and feeds to AI context). */
+  setPinActiveVersion: (storyId: string, pinId: string, index: number) => void;
 
   /* Pin set actions */
   /** Snapshot the current docked + AI-context arrangement as a new named set (becomes active). */
@@ -437,6 +454,17 @@ interface AuraV2State {
   addCowritePreset: (preset: Omit<CowritePreset, 'id' | 'createdAt' | 'updatedAt'>) => string;
   updateCowritePreset: (id: string, updates: Partial<Omit<CowritePreset, 'id'>>) => void;
   removeCowritePreset: (id: string) => void;
+
+  /* Scene Director actions (cache only — the enrichment call lives in
+     utils/sceneDirector.ts; callers pass the descriptors here to persist). */
+  setDirectorEnabled: (storyId: string, on: boolean) => void;
+  /** Merge descriptors into a story's cache, keyed by message id (last wins). */
+  putScenes: (storyId: string, descriptors: SceneDescriptor[]) => void;
+  /** Drop one passage's descriptor (id given) or the whole story's cache. */
+  clearScenes: (storyId: string, messageId?: string) => void;
+
+  /** Remember which pin holds a story's generated summary (or clear it). */
+  setSummaryPin: (storyId: string, pinId: string | null) => void;
 
   /* Annotation actions */
   addAnnotation: (storyId: string, annotation: Omit<Annotation, 'id' | 'createdAt' | 'updatedAt'>) => void;
@@ -490,6 +518,9 @@ export const useAuraV2Store = create<AuraV2State>()(
       chatThreadsByStory: {},
       activeThreadByStory: {},
       cowritePresets: [],
+      sceneByStory: {},
+      directorEnabledByStory: {},
+      summaryPinByStory: {},
 
       codexEnabled: true,
       codexUseAI: false,
@@ -787,6 +818,40 @@ export const useAuraV2Store = create<AuraV2State>()(
         set(patch);
       },
 
+      addPinVersion: (storyId, pinId, version) => {
+        const list = get().pinsByStory[storyId];
+        if (!list) return;
+        const now = Date.now();
+        const nextList = list.map(p => {
+          if (p.id !== pinId) return p;
+          // First edit: capture what's currently shown as the 'original'.
+          const base: PinVersion[] = p.versions?.length
+            ? p.versions
+            : [{ content: p.content, source: 'original', createdAt: p.createdAt }];
+          const added: PinVersion = {
+            ...version,
+            content: version.content.slice(0, MAX_PIN_CONTENT),
+            createdAt: now,
+          };
+          const all = [...base, added];
+          // Trim to the cap but always keep the original (index 0).
+          const versions = all.length > MAX_PIN_VERSIONS
+            ? [all[0], ...all.slice(all.length - (MAX_PIN_VERSIONS - 1))]
+            : all;
+          return { ...p, versions, activeVersion: versions.length - 1, content: added.content };
+        });
+        set({ pinsByStory: { ...get().pinsByStory, [storyId]: nextList } });
+      },
+      setPinActiveVersion: (storyId, pinId, index) => {
+        const list = get().pinsByStory[storyId];
+        if (!list) return;
+        const nextList = list.map(p =>
+          (p.id === pinId && p.versions && p.versions[index]
+            ? { ...p, activeVersion: index, content: p.versions[index].content }
+            : p));
+        set({ pinsByStory: { ...get().pinsByStory, [storyId]: nextList } });
+      },
+
       createPinSet: (storyId, name) => {
         const sets = get().pinSetsByStory[storyId] ?? [];
         if (sets.length >= MAX_PIN_SETS_PER_STORY) return '';
@@ -1041,6 +1106,36 @@ export const useAuraV2Store = create<AuraV2State>()(
         set({ cowritePresets: get().cowritePresets.filter(p => p.id !== id) });
       },
 
+      setDirectorEnabled: (storyId, on) => {
+        const next = { ...get().directorEnabledByStory };
+        if (on) next[storyId] = true; else delete next[storyId];
+        set({ directorEnabledByStory: next });
+      },
+      putScenes: (storyId, descriptors) => {
+        if (descriptors.length === 0) return;
+        const existing = get().sceneByStory[storyId] ?? {};
+        const merged = { ...existing };
+        for (const d of descriptors) merged[d.messageId] = d;
+        set({ sceneByStory: { ...get().sceneByStory, [storyId]: merged } });
+      },
+      clearScenes: (storyId, messageId) => {
+        const all = { ...get().sceneByStory };
+        if (messageId == null) {
+          delete all[storyId];
+        } else {
+          const forStory = { ...(all[storyId] ?? {}) };
+          delete forStory[messageId];
+          if (Object.keys(forStory).length === 0) delete all[storyId];
+          else all[storyId] = forStory;
+        }
+        set({ sceneByStory: all });
+      },
+      setSummaryPin: (storyId, pinId) => {
+        const next = { ...get().summaryPinByStory };
+        if (pinId) next[storyId] = pinId; else delete next[storyId];
+        set({ summaryPinByStory: next });
+      },
+
       addAnnotation: (storyId, annotation) => {
         const now = Date.now();
         const next: Annotation = { ...annotation, id: newId(), createdAt: now, updatedAt: now };
@@ -1102,6 +1197,9 @@ export const useAuraV2Store = create<AuraV2State>()(
         chatThreadsByStory: s.chatThreadsByStory,
         activeThreadByStory: s.activeThreadByStory,
         cowritePresets: s.cowritePresets,
+        sceneByStory: s.sceneByStory,
+        directorEnabledByStory: s.directorEnabledByStory,
+        summaryPinByStory: s.summaryPinByStory,
         codexEnabled: s.codexEnabled,
         codexUseAI: s.codexUseAI,
         codexHighlight: s.codexHighlight,

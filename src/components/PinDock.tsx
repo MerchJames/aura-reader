@@ -2,12 +2,38 @@ import React, { useEffect, useMemo, useRef, useState } from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import {
-  Bot, ChevronDown, ChevronUp, Lock, LockOpen, Move, PanelRightClose, PanelRightOpen, Pin as PinIcon, X,
+  Bot, ChevronDown, ChevronLeft, ChevronRight, ChevronUp, Loader2, Lock, LockOpen, Move,
+  PanelRightClose, PanelRightOpen, Pin as PinIcon, Wand2, X,
 } from 'lucide-react';
 import { useAppStore } from '../store';
 import { useAuraV2Store } from '../stores/useAuraV2Store';
 import { Pin } from '../types';
 import { cn } from '../utils/cn';
+import { chatCompletion } from '../utils/aiClient';
+import { resolveContent } from '../utils/lens';
+import { buildPinUpdateMessages, PinUpdateMode } from '../utils/pinUpdate';
+
+/**
+ * Assemble the recent story text feeding a 'source'-mode pin update: the pin's
+ * source message plus the few before it, resolved through any Lens edits, so a
+ * summary can be rebuilt with "what's happened since". Runs off the live stores
+ * on demand (not per render).
+ */
+const collectPinSource = (pin: Pin): string => {
+  const app = useAppStore.getState();
+  const storyId = app.currentStory?.id;
+  if (!storyId) return '';
+  const v2 = useAuraV2Store.getState();
+  const overrides = v2.overridesByStory[storyId];
+  const lensOn = !!v2.lensOnByStory[storyId];
+  const flat = app.chains.flatMap(c => c.messages);
+  const through = pin.messageId ? flat.findIndex(m => m.id === pin.messageId) : flat.length - 1;
+  const end = through === -1 ? flat.length : through + 1;
+  const window = flat.slice(Math.max(0, end - 8), end);
+  return window
+    .map(m => `${m.name}: ${resolveContent(m, overrides, lensOn)}`)
+    .join('\n\n');
+};
 
 /**
  * AI-written HTML renders in a fully sandboxed iframe: no scripts, no
@@ -63,12 +89,60 @@ const PinCard = ({
   hidden?: boolean;
 }) => {
   const updatePin = useAuraV2Store(s => s.updatePin);
+  const addPinVersion = useAuraV2Store(s => s.addPinVersion);
+  const setPinActiveVersion = useAuraV2Store(s => s.setPinActiveVersion);
+  // AI is available for pin updates only once an endpoint + model are set.
+  const aiReady = useAppStore(s => !!s.aiBaseUrl && !!s.aiModel);
   const cardRef = useRef<HTMLDivElement>(null);
   const draggingRef = useRef(false);
   const offsetRef = useRef({ x: 0, y: 0 });
   const posRef = useRef<{ x: number; y: number } | null>(null);
   const [dragPos, setDragPos] = useState<{ x: number; y: number } | null>(null);
   const [dragging, setDragging] = useState(false);
+
+  // AI update composer state.
+  const [composerOpen, setComposerOpen] = useState(false);
+  const [mode, setMode] = useState<PinUpdateMode>(pin.messageId ? 'source' : 'revise');
+  const [instruction, setInstruction] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const versions = pin.versions;
+  const activeVersion = pin.activeVersion ?? (versions ? versions.length - 1 : 0);
+
+  const runUpdate = async () => {
+    const app = useAppStore.getState();
+    const base = app.aiBaseUrl;
+    const key = app.aiApiKey;
+    const model = app.aiModel;
+    if (!base || !model || busy) return;
+    setBusy(true);
+    setError(null);
+    try {
+      const messages = buildPinUpdateMessages({
+        format: pin.format,
+        mode,
+        instruction,
+        currentContent: pin.content,
+        sourceText: mode === 'source' ? collectPinSource(pin) : undefined,
+        card: app.currentStory?.card,
+      });
+      const reply = (await chatCompletion(base, key, model, messages, { temperature: 0.4 })).trim();
+      if (!reply) { setError('Empty reply'); return; }
+      addPinVersion(storyId, pin.id, {
+        content: reply,
+        source: 'ai',
+        instruction: instruction.trim() || undefined,
+      });
+      setInstruction('');
+      setComposerOpen(false);
+    } catch (e: any) {
+      setError(e?.message ?? 'Update failed');
+    } finally {
+      setBusy(false);
+    }
+  };
+
   const locked = pin.locked ?? true;
   // A pin "floats" once it has an absolute position — locking then freezes
   // it in place rather than snapping it back to the dock column.
@@ -163,6 +237,18 @@ const PinCard = ({
         >
           <Bot size={12} />
         </button>
+        {aiReady && (
+          <button
+            onClick={() => setComposerOpen(o => !o)}
+            title="Update this pin with the AI (keeps every version)"
+            className={cn(
+              'p-1 rounded-md transition-colors text-app-text',
+              composerOpen ? 'text-accent bg-accent/15' : 'opacity-70 hover:opacity-100 hover:bg-app-text/10',
+            )}
+          >
+            <Wand2 size={12} />
+          </button>
+        )}
         <button
           onClick={toggleLock}
           title={locked ? 'Unlock to move' : 'Lock in place'}
@@ -194,6 +280,88 @@ const PinCard = ({
               <ReactMarkdown remarkPlugins={[remarkGfm]}>{pin.content}</ReactMarkdown>
             </div>
           )}
+        </div>
+      )}
+
+      {/* Version switcher — flip between the original and AI/manual updates. */}
+      {!pin.collapsed && versions && versions.length > 1 && (
+        <div className="flex items-center gap-1.5 px-2 py-1 border-t border-app-border/50 text-[10px] text-app-text/70">
+          <button
+            onClick={() => setPinActiveVersion(storyId, pin.id, (activeVersion - 1 + versions.length) % versions.length)}
+            className="w-5 h-5 rounded-full hover:bg-app-text/10 flex items-center justify-center"
+            title="Previous version"
+          >
+            <ChevronLeft size={12} />
+          </button>
+          <span className="font-mono tabular-nums">{activeVersion + 1}/{versions.length}</span>
+          <button
+            onClick={() => setPinActiveVersion(storyId, pin.id, (activeVersion + 1) % versions.length)}
+            className="w-5 h-5 rounded-full hover:bg-app-text/10 flex items-center justify-center"
+            title="Next version"
+          >
+            <ChevronRight size={12} />
+          </button>
+          <span className="uppercase tracking-wider opacity-70">
+            {versions[activeVersion]?.source === 'original' ? 'original' : versions[activeVersion]?.source}
+          </span>
+          {versions[activeVersion]?.instruction && (
+            <span className="truncate italic opacity-60" title={versions[activeVersion]!.instruction}>
+              · {versions[activeVersion]!.instruction}
+            </span>
+          )}
+        </div>
+      )}
+
+      {/* AI update composer — instruction + source toggle → a new version. */}
+      {composerOpen && (
+        <div className="px-2 py-2 border-t border-app-border/60 bg-app-text/[0.03] flex flex-col gap-1.5">
+          {pin.messageId && (
+            <div className="flex gap-1">
+              {(['source', 'revise'] as const).map(m => (
+                <button
+                  key={m}
+                  onClick={() => setMode(m)}
+                  className={cn(
+                    'flex-1 py-1 text-[10px] rounded-md border transition-colors',
+                    mode === m
+                      ? 'border-accent bg-accent/10 text-accent font-bold'
+                      : 'border-transparent bg-app-text/5 hover:bg-app-text/10 text-app-text/80',
+                  )}
+                >
+                  {m === 'source' ? 'From source' : 'Revise text'}
+                </button>
+              ))}
+            </div>
+          )}
+          <textarea
+            value={instruction}
+            onChange={e => setInstruction(e.target.value)}
+            placeholder={mode === 'source'
+              ? 'e.g. re-summarize with what’s happened since'
+              : 'e.g. tighten this and add the latest reveal'}
+            rows={2}
+            className="w-full resize-none rounded-md bg-surface border border-app-border px-2 py-1 text-[11px] text-app-text placeholder:text-app-text/40 focus:outline-none focus:border-accent"
+            onKeyDown={e => {
+              if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') { e.preventDefault(); void runUpdate(); }
+            }}
+          />
+          {error && <span className="text-[10px] text-red-500">{error}</span>}
+          <div className="flex items-center gap-1.5">
+            <button
+              onClick={() => void runUpdate()}
+              disabled={busy}
+              className="flex items-center gap-1 px-2.5 py-1 rounded-md bg-accent text-white text-[11px] font-medium disabled:opacity-50"
+            >
+              {busy ? <Loader2 size={12} className="animate-spin" /> : <Wand2 size={12} />}
+              {busy ? 'Updating…' : 'Update'}
+            </button>
+            <button
+              onClick={() => { setComposerOpen(false); setError(null); }}
+              className="px-2 py-1 rounded-md text-[11px] text-app-text/70 hover:bg-app-text/10"
+            >
+              Cancel
+            </button>
+          </div>
         </div>
       )}
     </div>

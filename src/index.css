@@ -764,6 +764,112 @@ body {
 }
 .no-effects .word-reveal { animation: none !important; }
 
+/* Expressive reading — kinetic typography. The look scales through CSS vars
+   set by the `.expr-<intensity>` class on the reader page; the defaults below
+   are the "Expressive" preset so the styles still read on their own. */
+.expr-shout {
+  display: inline-block;
+  font-weight: 800;
+  font-size: var(--expr-shout-size, 1.15em);
+  letter-spacing: 0.01em;
+  line-height: 1;
+  color: color-mix(in srgb, var(--app-accent) var(--expr-shout-tint, 40%), currentColor);
+}
+/* A one-shot shimmer as a shout streams in — pairs with the word-reveal span. */
+.word-reveal.expr-shout { animation-name: exprShoutIn; animation-duration: 0.45s; }
+@keyframes exprShoutIn {
+  0%   { opacity: 0; transform: scale(1.35); text-shadow: 0 0 12px var(--app-accent); }
+  60%  { opacity: 1; transform: scale(0.97); }
+  100% { opacity: 1; transform: scale(1); text-shadow: none; }
+}
+/* Key line (bold) — a touch of tracking so it reads as emphasis, not just colour. */
+.expr-key { letter-spacing: var(--expr-key-track, 0.012em); }
+
+/* Whisper (Scene Director emphasis) — quieter, lighter, slightly condensed. */
+.expr-whisper {
+  opacity: 0.62;
+  font-style: italic;
+  font-size: 0.94em;
+  letter-spacing: -0.01em;
+}
+
+/* TTS karaoke cue — soft highlight on the word the narration is currently on
+   (the reveal is paced to the voice, so the leading word is what's spoken). */
+.tts-reading {
+  border-radius: 3px;
+  background: color-mix(in srgb, var(--app-accent) 24%, transparent);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--app-accent) 24%, transparent);
+  transition: background 0.12s ease;
+}
+
+/* Scene break — a centred ornament with breathing room instead of a flat rule. */
+.scene-break {
+  margin: var(--expr-scene-gap, 1.6em) 0;
+  text-align: center;
+  letter-spacing: 0.6em;
+  font-size: 0.85em;
+  opacity: var(--expr-scene-opacity, 0.5);
+  color: var(--app-accent);
+  user-select: none;
+}
+
+/* Intensity presets — subtle whisper → cinematic punch. */
+.reader-page.expr-subtle {
+  --expr-shout-size: 1.07em; --expr-shout-tint: 24%; --expr-key-track: 0.006em;
+  --expr-scene-gap: 1.2em; --expr-scene-opacity: 0.4;
+}
+.reader-page.expr-expressive {
+  --expr-shout-size: 1.15em; --expr-shout-tint: 40%; --expr-key-track: 0.012em;
+  --expr-scene-gap: 1.6em; --expr-scene-opacity: 0.5;
+}
+.reader-page.expr-cinematic {
+  --expr-shout-size: 1.3em; --expr-shout-tint: 58%; --expr-key-track: 0.022em;
+  --expr-scene-gap: 2.4em; --expr-scene-opacity: 0.62;
+}
+
+/* Drop cap — the opening letter of each AI passage set large, book-style.
+   Only non-user, non-streaming passages (the reveal would jump the cap). */
+.reader-page.drop-caps .message-block[data-role="assistant"]:not([data-streaming="true"])
+  .markdown-body > p:first-of-type::first-letter {
+  float: left;
+  font-size: 3.1em;
+  line-height: 0.82;
+  padding: 0.06em 0.09em 0 0;
+  margin-right: 0.02em;
+  font-weight: 700;
+  color: var(--app-accent);
+  font-family: Georgia, 'Times New Roman', serif;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .word-reveal.expr-shout { animation: none !important; }
+}
+.no-effects .word-reveal.expr-shout { animation: none !important; }
+
+/* Scene Director — adaptive theming. A soft, edge-weighted wash behind the
+   text whose colour tracks the passage's mood and whose strength tracks its
+   tension. Sits below the reading column (which is relative z-10). */
+.scene-wash {
+  position: fixed;
+  inset: 0;
+  z-index: 0;
+  pointer-events: none;
+  background: radial-gradient(ellipse at 50% 40%, transparent 42%, var(--scene-color, transparent) 130%);
+  transition: opacity 1.6s ease, background-color 1.6s ease;
+}
+.scene-wash[data-mood="tense"]      { --scene-color: #3b4c6b; }
+.scene-wash[data-mood="tender"]     { --scene-color: #7a4a5c; }
+.scene-wash[data-mood="ominous"]    { --scene-color: #3d2a55; }
+.scene-wash[data-mood="joyful"]     { --scene-color: #7a5a26; }
+.scene-wash[data-mood="melancholy"] { --scene-color: #384463; }
+.scene-wash[data-mood="action"]     { --scene-color: #7a3320; }
+.scene-wash[data-mood="eerie"]      { --scene-color: #2f5340; }
+.scene-wash[data-mood="awe"]        { --scene-color: #276a7a; }
+@media (prefers-reduced-motion: reduce) {
+  .scene-wash { transition: none; }
+}
+.no-effects .scene-wash { display: none; }
+
 @keyframes wordFade { 0% { opacity: 0; } 100% { opacity: 1; } }
 @keyframes wordBlur {
   0% { opacity: 0; filter: blur(10px); transform: scale(1.06); }

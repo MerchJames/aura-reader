@@ -1,0 +1,109 @@
+/**
+ * Scene Director runner — the impure glue between the stores and the pure
+ * enrichment lib. Gathers passages from the currently-open story (resolved
+ * through Lens edits so hashes match what the reader sees), runs them through
+ * the Director, and streams the descriptors into the cache with live progress.
+ *
+ * Only one run happens at a time (guarded by the runtime store). A single
+ * module-level AbortController lets the UI stop an in-flight run.
+ */
+
+import { useAppStore } from '../store';
+import { useAuraV2Store } from '../stores/useAuraV2Store';
+import { useSceneDirectorStore } from '../stores/useSceneDirectorStore';
+import { resolveContent } from './lens';
+import { EnrichConfig, enrichPassages, ScenePassage, selectStale } from './sceneDirector';
+
+let controller: AbortController | null = null;
+
+/** AI config for enrichment, or null when no endpoint/model is configured. */
+const aiConfig = (): EnrichConfig | null => {
+  const app = useAppStore.getState();
+  if (!app.aiBaseUrl || !app.aiModel) return null;
+  return {
+    base: app.aiBaseUrl,
+    key: app.aiApiKey,
+    model: app.aiModel,
+    card: app.currentStory?.card,
+  };
+};
+
+/** Map a story's messages to passages, skipping the reader's own (user) turns. */
+const toPassages = (messages: { id: string; name: string; role: string }[], storyId: string): ScenePassage[] => {
+  const v2 = useAuraV2Store.getState();
+  const overrides = v2.overridesByStory[storyId];
+  const lensOn = !!v2.lensOnByStory[storyId];
+  const out: ScenePassage[] = [];
+  for (const m of messages) {
+    if (m.role === 'user') continue;
+    out.push({ messageId: m.id, name: m.name, content: resolveContent(m as any, overrides, lensOn) });
+  }
+  return out;
+};
+
+/** Every AI passage in the open story. */
+export const passagesForStory = (): ScenePassage[] => {
+  const app = useAppStore.getState();
+  if (!app.currentStory) return [];
+  return toPassages(app.chains.flatMap(c => c.messages), app.currentStory.id);
+};
+
+/** AI passages on the page/chapter the reader is currently on. */
+export const currentPagePassages = (): ScenePassage[] => {
+  const app = useAppStore.getState();
+  const chain = app.chains[app.currentChainIndex];
+  if (!app.currentStory || !chain) return [];
+  return toPassages(chain.messages, app.currentStory.id);
+};
+
+/** Count of directed (fresh) vs. total AI passages in the open story. */
+export const directorCoverage = (storyId: string): { directed: number; total: number } => {
+  const all = passagesForStory();
+  const cache = useAuraV2Store.getState().sceneByStory[storyId];
+  const stale = selectStale(all, cache).length;
+  return { directed: all.length - stale, total: all.length };
+};
+
+/** Abort any in-flight run. */
+export const stopEnrich = (): void => {
+  controller?.abort();
+  controller = null;
+  useSceneDirectorStore.getState().end();
+};
+
+/**
+ * Enrich the given passages (only the stale/missing ones). No-ops when nothing
+ * is stale, no endpoint is set, or a run is already going. Persists each batch
+ * as it lands so progress is visible and a stop keeps what was read.
+ */
+const run = async (storyId: string, passages: ScenePassage[]): Promise<void> => {
+  const cfg = aiConfig();
+  if (!cfg) return;
+  const dir = useSceneDirectorStore.getState();
+  if (dir.running) return;
+
+  const cache = useAuraV2Store.getState().sceneByStory[storyId];
+  const stale = selectStale(passages, cache);
+  if (stale.length === 0) return;
+
+  controller = new AbortController();
+  dir.begin(storyId, stale.length);
+  try {
+    await enrichPassages(stale, cfg, {
+      signal: controller.signal,
+      onBatch: (descriptors, done) => {
+        if (descriptors.length) useAuraV2Store.getState().putScenes(storyId, descriptors);
+        useSceneDirectorStore.getState().advance(done);
+      },
+    });
+  } finally {
+    useSceneDirectorStore.getState().end();
+    controller = null;
+  }
+};
+
+/** Manual "Enrich all" — read every stale passage in the story. */
+export const enrichAll = (storyId: string): Promise<void> => run(storyId, passagesForStory());
+
+/** Auto (hybrid) — read the current page/chapter's stale passages. */
+export const enrichCurrentPage = (storyId: string): Promise<void> => run(storyId, currentPagePassages());

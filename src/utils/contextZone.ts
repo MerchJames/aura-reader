@@ -30,6 +30,36 @@ export const groupRanges = (nums: number[]): string => {
   return parts.join(', ');
 };
 
+/**
+ * Parse a free-form range spec (the inverse of {@link groupRanges}) into the set
+ * of 1-based reading indices it names. Accepts comma/space-separated singles and
+ * ranges with any dash — e.g. "1-30", "1–30, 45, 50-60", "3 7 9". Reversed
+ * ranges ("30-1") are normalized; non-numeric junk is ignored. `max` clamps the
+ * upper bound so an open "1-99999" can't balloon. Returns sorted, deduped.
+ */
+export const parseRangeSpec = (spec: string, max?: number): number[] => {
+  const out = new Set<number>();
+  const cap = max && max > 0 ? max : Infinity;
+  for (const token of spec.split(/[,\s]+/)) {
+    const part = token.trim();
+    if (!part) continue;
+    const m = part.match(/^(\d+)\s*[-–—]\s*(\d+)$/);
+    if (m) {
+      let lo = parseInt(m[1], 10);
+      let hi = parseInt(m[2], 10);
+      if (lo > hi) [lo, hi] = [hi, lo];
+      for (let n = Math.max(1, lo); n <= Math.min(hi, cap); n++) out.add(n);
+      continue;
+    }
+    const single = part.match(/^(\d+)$/);
+    if (single) {
+      const n = parseInt(single[1], 10);
+      if (n >= 1 && n <= cap) out.add(n);
+    }
+  }
+  return [...out].sort((a, b) => a - b);
+};
+
 /** Resolve a message's live content (so the currently-streaming line reads true). */
 export type TextResolver = (m: Message) => string;
 

@@ -4,6 +4,7 @@ import { useAuraV2Store } from '../stores/useAuraV2Store';
 import { plainTextForSpeech, processText } from '../utils/textProcessor';
 import { resolveContent } from '../utils/lens';
 import { kokoroSpeak, voiceForSpeaker } from '../utils/kokoro';
+import { emotionProsody } from '../utils/sceneMood';
 
 export const ttsSupported = () =>
   typeof window !== 'undefined' && 'speechSynthesis' in window;
@@ -82,9 +83,20 @@ export const useTTS = () => {
     const plain = plainTextForSpeech(processedText);
     if (!plain) return;
 
-    const rate = ttsEffectiveRate(s.ttsRate, s.playbackSpeed, s.ttsFollowSpeed);
+    const baseRate = ttsEffectiveRate(s.ttsRate, s.playbackSpeed, s.ttsFollowSpeed);
+    // Emotional TTS: shape rate/pitch by the Scene Director's read of this
+    // passage (speaker emotion + tension), when a descriptor exists.
+    const descriptor = s.emotionalTts && storyId
+      ? v2.sceneByStory[storyId]?.[msg.id]
+      : undefined;
+    const prosody = descriptor
+      ? emotionProsody(descriptor.speaker?.emotion, descriptor.tension)
+      : { rate: 1, pitch: 1 };
+    const rate = baseRate * prosody.rate;
     const finish = () => {
       const st = useAppStore.getState();
+      // Release the reveal so any un-narrated tail can complete + advance.
+      st.setTtsProgress(1);
       st.setTtsPending(false);
       if (st.awaitingAdvance) {
         st.setAwaitingAdvance(false);
@@ -106,6 +118,7 @@ export const useTTS = () => {
         ttsVoiceByCharacter: s.ttsVoiceByCharacter,
       });
       s.setTtsPending(true);
+      s.setTtsProgress(0);
       kokoroSpeak(s.kokoroBaseUrl, s.kokoroApiKey, voice, plain, rate, controller.signal)
         .then(blob => {
           if (controller.signal.aborted) return;
@@ -114,6 +127,13 @@ export const useTTS = () => {
           const audio = audioRef.current ?? new Audio();
           audioRef.current = audio;
           audio.src = url;
+          // Real clip position → reveal progress (smooth, unlike word boundaries).
+          audio.ontimeupdate = () => {
+            const d = audio.duration;
+            if (d && Number.isFinite(d)) {
+              useAppStore.getState().setTtsProgress(Math.min(1, audio.currentTime / d));
+            }
+          };
           audio.onended = finish;
           audio.onerror = finish;
           void audio.play().catch(() => finish());
@@ -124,7 +144,9 @@ export const useTTS = () => {
 
       return () => {
         stopKokoro();
-        useAppStore.getState().setTtsPending(false);
+        const st = useAppStore.getState();
+        st.setTtsPending(false);
+        st.setTtsProgress(1);
       };
     }
 
@@ -134,17 +156,33 @@ export const useTTS = () => {
     const voice = speechSynthesis.getVoices().find(v => v.voiceURI === s.ttsVoiceURI);
     if (voice) utterance.voice = voice;
     utterance.rate = rate;
-    utterance.pitch = s.ttsPitch;
+    utterance.pitch = s.ttsPitch * prosody.pitch;
     utterance.onend = finish;
     utterance.onerror = finish;
 
+    // Track spoken position so the visual reveal can follow the voice. Some
+    // browsers never fire `boundary` — a watchdog lifts the gate if so.
+    const total = plain.length || 1;
+    let sawBoundary = false;
+    utterance.onboundary = (e) => {
+      sawBoundary = true;
+      useAppStore.getState().setTtsProgress(Math.min(1, (e.charIndex ?? 0) / total));
+    };
+    const watchdog = setTimeout(() => {
+      if (!sawBoundary) useAppStore.getState().setTtsProgress(1);
+    }, 1500);
+
     s.setTtsPending(true);
+    s.setTtsProgress(0);
     speechSynthesis.cancel();
     speechSynthesis.speak(utterance);
 
     return () => {
+      clearTimeout(watchdog);
       speechSynthesis.cancel();
-      useAppStore.getState().setTtsPending(false);
+      const st = useAppStore.getState();
+      st.setTtsPending(false);
+      st.setTtsProgress(1);
     };
   }, [enabled, engine, messageId]);
 
@@ -167,7 +205,9 @@ export const useTTS = () => {
     if (!enabled) {
       if (ttsSupported()) speechSynthesis.cancel();
       stopKokoro();
-      useAppStore.getState().setTtsPending(false);
+      const st = useAppStore.getState();
+      st.setTtsPending(false);
+      st.setTtsProgress(1);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [enabled]);

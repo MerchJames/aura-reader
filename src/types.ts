@@ -324,6 +324,44 @@ export interface AiAdvancedConfig {
 /** Per-word streaming text effect, independent of the block reveal animation. */
 export type StreamEffect = 'none' | 'fade' | 'blur' | 'ink' | 'glitch' | 'rise';
 
+/** How strongly expressive typography + cinematic pacing are applied. */
+export type ExpressiveIntensity = 'subtle' | 'expressive' | 'cinematic';
+
+/* ------------------------------------------------------------------ */
+/* Scene Director — cached per-passage AI scene reading (immersion).    */
+/* See docs/SCENE_DIRECTOR.md. Non-destructive: annotates, never edits. */
+/* ------------------------------------------------------------------ */
+
+export type Mood =
+  | 'tense' | 'tender' | 'ominous' | 'joyful' | 'melancholy'
+  | 'action' | 'eerie' | 'awe' | 'neutral';
+
+/** An emphasis span the Director judged worth performing (verbatim substring). */
+export interface SceneEmphasis {
+  text: string;
+  kind: 'whisper' | 'shout' | 'beat';
+}
+
+/**
+ * The Director's cached read of one passage. Tiny (~200 bytes) and keyed by
+ * message id per story. `hash` is the fingerprint of the content it was built
+ * from — when the passage is edited/swiped the hash changes and the descriptor
+ * is treated as stale (re-enriched or dropped).
+ */
+export interface SceneDescriptor {
+  messageId: string;
+  hash: string;
+  mood: Mood;
+  /** 0..1 — drives pacing lean + (later) score intensity. */
+  tension: number;
+  location?: string;
+  timeOfDay?: 'dawn' | 'day' | 'dusk' | 'night' | 'unknown';
+  /** Dominant speaker + their emotion, for expressive TTS. */
+  speaker?: { name: string; emotion: string };
+  emphasis?: SceneEmphasis[];
+  createdAt: number;
+}
+
 export type PinFormat = 'html' | 'markdown';
 
 /**
@@ -332,13 +370,29 @@ export type PinFormat = 'html' | 'markdown';
  * live in the right margin on wide windows; `inContext` feeds the pin
  * back to the AI as reference material.
  */
+/** One saved state of a pin's content — the original plus any AI/manual edits. */
+export interface PinVersion {
+  content: string;
+  /** How this version was produced. */
+  source: 'original' | 'ai' | 'manual';
+  /** The instruction given to the AI, when source === 'ai'. */
+  instruction?: string;
+  createdAt: number;
+}
+
 export interface Pin {
   id: string;
   title: string;
   format: PinFormat;
+  /** The currently-shown content — always mirrors `versions[activeVersion]`
+   *  when a version history exists (so rendering / AI context need no change). */
   content: string;
   /** Message the visual was captured from, when known. */
   messageId?: string;
+  /** Version history — absent until the pin is first updated (then length ≥ 2). */
+  versions?: PinVersion[];
+  /** Which version `content` currently reflects. */
+  activeVersion?: number;
   inContext: boolean;
   docked: boolean;
   collapsed?: boolean;
@@ -398,6 +452,20 @@ export interface AppConfig {
   animationStyle: AnimationStyle;
   /** Per-word effect applied to text as it streams in. */
   streamEffect: StreamEffect;
+  /** Kinetic typography — scale shouts, style scene breaks, emphasize key lines. */
+  expressiveText: boolean;
+  /** Adaptive reveal pacing — linger in dialogue, quicken action, beat on breaks. */
+  cinematicPacing: boolean;
+  /** Overall strength of the expressive typography + pacing. */
+  expressiveIntensity: ExpressiveIntensity;
+  /** Drop cap on the opening letter of each AI passage (prose flourish). */
+  dropCaps: boolean;
+  /** Let the Scene Director's mood/tension tint the reading surface. */
+  sceneTheming: boolean;
+  /** Let the Scene Director choose the ambient bed from scene mood/location. */
+  sceneSoundscapes: boolean;
+  /** Shape TTS rate/pitch by the passage's emotion + tension. */
+  emotionalTts: boolean;
   hideMetadata: boolean;
   /** Show images embedded in messages / attached to them. */
   showImages: boolean;
@@ -504,6 +572,9 @@ export interface AppState extends AppConfig {
   /** TTS coordination (transient, not persisted). */
   ttsPending: boolean;
   awaitingAdvance: boolean;
+  /** How far the voice has spoken the current message, 0..1 (1 = not gating).
+   *  Drives the reveal so the text can't outrun the narration. */
+  ttsProgress: number;
 
   /** Selected swipe/branch index per message id (transient). */
   swipeSelections: Record<string, number>;
@@ -558,6 +629,13 @@ export interface AppState extends AppConfig {
   setBgColor: (color: string) => void;
   setAnimationStyle: (style: AnimationStyle) => void;
   setStreamEffect: (effect: StreamEffect) => void;
+  setExpressiveText: (on: boolean) => void;
+  setCinematicPacing: (on: boolean) => void;
+  setExpressiveIntensity: (intensity: ExpressiveIntensity) => void;
+  setDropCaps: (on: boolean) => void;
+  setSceneTheming: (on: boolean) => void;
+  setSceneSoundscapes: (on: boolean) => void;
+  setEmotionalTts: (on: boolean) => void;
   setHideMetadata: (hide: boolean) => void;
   setAutoStream: (autoStream: boolean) => void;
   setAutoFormat: (autoFormat: boolean) => void;
@@ -575,6 +653,7 @@ export interface AppState extends AppConfig {
   setTtsPitch: (ttsPitch: number) => void;
   setTtsFollowSpeed: (ttsFollowSpeed: boolean) => void;
   setTtsPending: (ttsPending: boolean) => void;
+  setTtsProgress: (progress: number) => void;
   setTtsEngine: (ttsEngine: TtsEngine) => void;
   setKokoroBaseUrl: (kokoroBaseUrl: string) => void;
   setKokoroApiKey: (kokoroApiKey: string) => void;

@@ -1,11 +1,13 @@
 import React, { useMemo, useRef, useState } from 'react';
 import {
-  AlignLeft, Download, FileText, Focus, ImageIcon, LayoutTemplate, Loader2, MessageSquareQuote,
-  Music2, PauseCircle, Play, PlayCircle, Quote, RefreshCw, Save, Sparkles, Terminal, Trash2, Type,
+  AlignLeft, Clapperboard, Download, FileText, Focus, ImageIcon, LayoutTemplate, Loader2, MessageSquareQuote,
+  Music2, PauseCircle, Play, PlayCircle, Quote, RefreshCw, Save, Sparkles, Square, Terminal, Trash2, Type,
   UserRound, Volume2, X, ZoomIn,
 } from 'lucide-react';
 import { useAppStore } from '../store';
 import { useAuraV2Store } from '../stores/useAuraV2Store';
+import { useSceneDirectorStore } from '../stores/useSceneDirectorStore';
+import { directorCoverage, enrichAll, stopEnrich } from '../utils/sceneDirectorRunner';
 import { ttsSupported, useVoices } from '../hooks/useTTS';
 import { KNOWN_KOKORO_VOICES, kokoroSpeak, listKokoroVoices } from '../utils/kokoro';
 import { AMBIENT_SOUNDS } from '../utils/ambient';
@@ -354,6 +356,108 @@ const AmbientSettings = () => {
   );
 };
 
+/**
+ * Scene Director controls (per open story). Hybrid pass: while enabled it
+ * auto-reads the current page (see useSceneDirector); "Enrich all" reads the
+ * rest on demand. Descriptors cache + invalidate by content hash, so edited
+ * passages get re-read automatically.
+ */
+const SceneDirectorSection = () => {
+  const storyId = useAppStore(s => s.currentStory?.id);
+  const chains = useAppStore(s => s.chains);
+  const aiReady = useAppStore(s => !!s.aiBaseUrl && !!s.aiModel);
+  const enabled = useAuraV2Store(s => (storyId ? !!s.directorEnabledByStory[storyId] : false));
+  const setDirectorEnabled = useAuraV2Store(s => s.setDirectorEnabled);
+  const sceneCache = useAuraV2Store(s => (storyId ? s.sceneByStory[storyId] : undefined));
+  const sceneTheming = useAppStore(s => s.sceneTheming);
+  const setSceneTheming = useAppStore(s => s.setSceneTheming);
+  const sceneSoundscapes = useAppStore(s => s.sceneSoundscapes);
+  const setSceneSoundscapes = useAppStore(s => s.setSceneSoundscapes);
+  const emotionalTts = useAppStore(s => s.emotionalTts);
+  const setEmotionalTts = useAppStore(s => s.setEmotionalTts);
+  const running = useSceneDirectorStore(s => s.running);
+  const done = useSceneDirectorStore(s => s.done);
+  const total = useSceneDirectorStore(s => s.total);
+
+  const coverage = useMemo(
+    () => (storyId ? directorCoverage(storyId) : { directed: 0, total: 0 }),
+    // Recompute when the story, its text, or the descriptor cache changes.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [storyId, chains, sceneCache],
+  );
+
+  if (!storyId) return null;
+  const complete = coverage.total > 0 && coverage.directed >= coverage.total;
+
+  return (
+    <Section title="Scene Director">
+      <Toggle
+        icon={<Clapperboard size={16} />}
+        label="AI scene reading"
+        value={enabled}
+        onChange={(v) => setDirectorEnabled(storyId, v)}
+      />
+      {!aiReady ? (
+        <span className="text-[11px] text-muted">
+          Set an AI endpoint in the assistant panel to enable the Director.
+        </span>
+      ) : (
+        <>
+          <div className="flex items-center justify-between text-xs px-2">
+            <span className="opacity-70">
+              {running
+                ? `Reading… ${done}/${total}`
+                : `Directed ${coverage.directed}/${coverage.total} passages`}
+            </span>
+            {running ? (
+              <button
+                onClick={() => stopEnrich()}
+                className="inline-flex items-center gap-1 px-2 py-1 rounded-md text-[11px] bg-app-text/10 hover:bg-app-text/20"
+              >
+                <Square size={11} /> Stop
+              </button>
+            ) : (
+              <button
+                onClick={() => void enrichAll(storyId)}
+                disabled={!enabled || complete || coverage.total === 0}
+                className="inline-flex items-center gap-1 px-2 py-1 rounded-md text-[11px] bg-accent/15 text-accent font-medium disabled:opacity-40 disabled:cursor-not-allowed"
+              >
+                {complete ? 'All read' : 'Enrich all'}
+              </button>
+            )}
+          </div>
+          <Toggle
+            icon={<Sparkles size={16} />}
+            label="Adaptive theming"
+            value={sceneTheming}
+            onChange={setSceneTheming}
+          />
+          <Toggle
+            icon={<Music2 size={16} />}
+            label="Adaptive soundscapes"
+            value={sceneSoundscapes}
+            onChange={setSceneSoundscapes}
+          />
+          <Toggle
+            icon={<Volume2 size={16} />}
+            label="Emotional narration (TTS)"
+            value={emotionalTts}
+            onChange={setEmotionalTts}
+          />
+          <span className="text-[11px] text-muted">
+            Reads each passage's mood, location, and emphasis so the reader can
+            adapt to the scene. The current page reads automatically; “Enrich
+            all” does the rest. Edited passages are re-read on their own.
+            Theming tints the page to the scene's mood; soundscapes pick the
+            ambient bed from it (needs ambient audio on); emotional narration
+            shapes the TTS voice by the speaker's feeling (needs TTS on).
+          </span>
+        </>
+      )}
+    </Section>
+  );
+};
+
 export const SettingsPanel = ({ onOpenAutoFormat }: { onOpenAutoFormat: () => void }) => {
   const store = useAppStore();
   const [configName, setConfigName] = useState('');
@@ -531,7 +635,56 @@ export const SettingsPanel = ({ onOpenAutoFormat }: { onOpenAutoFormat: () => vo
                 from) the block reveal above.
               </span>
             </div>
+            <div className="pt-2 flex flex-col gap-1">
+              <p className="text-xs font-medium mb-0.5 opacity-80">Expressive reading</p>
+              <Toggle
+                icon={<Type size={16} />}
+                label="Kinetic emphasis"
+                value={store.expressiveText}
+                onChange={store.setExpressiveText}
+              />
+              <Toggle
+                icon={<Sparkles size={16} />}
+                label="Cinematic pacing"
+                value={store.cinematicPacing}
+                onChange={store.setCinematicPacing}
+              />
+              {(store.expressiveText || store.cinematicPacing) && (
+                <div className="pt-1">
+                  <p className="text-xs font-medium mb-1.5 opacity-80">Intensity</p>
+                  <div className="grid grid-cols-3 gap-2">
+                    {(['subtle', 'expressive', 'cinematic'] as const).map(level => (
+                      <button
+                        key={level}
+                        onClick={() => store.setExpressiveIntensity(level)}
+                        className={cn(
+                          'py-1.5 text-xs rounded-md border capitalize transition-colors',
+                          store.expressiveIntensity === level
+                            ? 'border-accent bg-accent/10 text-accent font-bold'
+                            : 'border-transparent bg-app-text/5 hover:bg-app-text/10',
+                        )}
+                      >
+                        {level}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              )}
+              <Toggle
+                icon={<Type size={16} />}
+                label="Drop caps"
+                value={store.dropCaps}
+                onChange={store.setDropCaps}
+              />
+              <span className="text-[11px] text-muted">
+                Scales shouted <span className="expr-shout" style={{ fontSize: '1em' }}>WORDS</span>,
+                dresses scene breaks, and lets the reveal linger in dialogue and
+                beat on scene changes. Drop caps open each AI passage book-style.
+              </span>
+            </div>
           </Section>
+
+          <SceneDirectorSection />
 
           <Section title="Reading">
             <Toggle

@@ -3,12 +3,17 @@ import { useAppStore } from '../store';
 import { useAuraV2Store } from '../stores/useAuraV2Store';
 import { processText } from '../utils/textProcessor';
 import { resolveContent } from '../utils/lens';
+import { holdMsAt, holdSpeedScale, pacingFor, rateMultiplier } from '../utils/expressive';
 
 /** Characters revealed per second for a 1-100 speed setting. */
 export const charsPerSecond = (speed: number) => 8 + speed * 2.2;
 
 /** Words revealed per second for a 1-100 speed setting (~50 ≈ 350 wpm). */
 export const wordsPerSecond = (speed: number) => 0.8 + speed * 0.1;
+
+/** Chars the reveal is allowed to lead the narration by, so words appear just
+ *  ahead of the voice rather than trailing it. */
+const TTS_LEAD_CHARS = 30;
 
 const nextWordEnd = (text: string, from: number): number => {
   let i = from;
@@ -39,6 +44,8 @@ export const useStreamer = () => {
     let pauseTimer: ReturnType<typeof setTimeout> | null = null;
     let last = performance.now();
     let acc = 0;
+    // Cinematic pacing: suppress reveals until this timestamp for a dramatic beat.
+    let holdUntil = 0;
     let cachedFullText: string | null = null;
     let cachedKey = '';
 
@@ -120,21 +127,57 @@ export const useStreamer = () => {
         return; // effect re-runs for the next message
       }
 
+      // Cinematic pacing: linger in dialogue, quicken through action, and hold a
+      // beat at sentence / scene boundaries — all proportional to the reader's
+      // speed so total reading time barely moves.
+      const pacing = s.cinematicPacing;
+      if (pacing && now < holdUntil) {
+        raf = requestAnimationFrame(tick); // mid-beat — keep the loop, reveal nothing
+        return;
+      }
+      const pacingCfg = pacingFor(s.expressiveIntensity);
+      const mul = pacing ? rateMultiplier(full, s.streamedText.length, pacingCfg) : 1;
+
+      // Voice sync: while TTS narrates this message, the reveal must not outrun
+      // it. Cap the reveal to the spoken position (plus a small lead so words
+      // surface just ahead of the voice, not behind it).
+      const ttsSync = s.ttsEnabled && s.ttsPending;
+      const voiceCap = ttsSync
+        ? Math.ceil(s.ttsProgress * full.length) + TTS_LEAD_CHARS
+        : Infinity;
+      if (ttsSync && s.streamedText.length >= voiceCap) {
+        raf = requestAnimationFrame(tick); // caught up to the voice — wait for it
+        return;
+      }
+
+      const startLen = s.streamedText.length;
+      let end = startLen;
       if (s.revealMode === 'word') {
-        acc += (dt / 1000) * wordsPerSecond(speed);
+        acc += (dt / 1000) * wordsPerSecond(speed) * mul;
         const words = Math.floor(acc);
         if (words >= 1) {
           acc -= words;
-          let end = s.streamedText.length;
           for (let w = 0; w < words; w++) end = nextWordEnd(full, end);
-          s.updateStreamedText(full.slice(0, end));
         }
       } else {
-        acc += (dt / 1000) * charsPerSecond(speed);
+        acc += (dt / 1000) * charsPerSecond(speed) * mul;
         const reveal = Math.floor(acc);
         if (reveal >= 1) {
           acc -= reveal;
-          s.updateStreamedText(full.slice(0, s.streamedText.length + reveal));
+          end = startLen + reveal;
+        }
+      }
+
+      if (end > voiceCap) {
+        end = Math.max(startLen, voiceCap);
+        acc = 0; // don't bank a burst while waiting for the narration
+      }
+
+      if (end > startLen) {
+        s.updateStreamedText(full.slice(0, end));
+        if (pacing) {
+          const hold = holdMsAt(full, Math.min(end, full.length), pacingCfg);
+          if (hold > 0) holdUntil = now + hold * holdSpeedScale(speed);
         }
       }
       raf = requestAnimationFrame(tick);

@@ -2,7 +2,7 @@ import React, { useMemo, useState } from 'react';
 import { GitBranch, Layers, Trash2, X } from 'lucide-react';
 import { useAppStore } from '../store';
 import { useAuraV2Store } from '../stores/useAuraV2Store';
-import { flatWithIndex, groupRanges } from '../utils/contextZone';
+import { flatWithIndex, groupRanges, parseRangeSpec } from '../utils/contextZone';
 import { cn } from '../utils/cn';
 
 /** One-line, markdown-stripped preview of a message for the row list. */
@@ -41,8 +41,8 @@ export const ContextZoneBuilder = ({
   const [included, setIncluded] = useState<Set<string>>(new Set(existing?.messageIds ?? []));
   const [branchlines, setBranchlines] = useState<Set<string>>(new Set(existing?.branchlineIds ?? []));
   const [search, setSearch] = useState('');
-  const [rangeFrom, setRangeFrom] = useState('');
-  const [rangeTo, setRangeTo] = useState('');
+  const [rangeSpec, setRangeSpec] = useState('');
+  const [rangeBranchlines, setRangeBranchlines] = useState(false);
 
   const toggle = (setFn: React.Dispatch<React.SetStateAction<Set<string>>>, id: string) =>
     setFn(prev => {
@@ -52,17 +52,23 @@ export const ContextZoneBuilder = ({
     });
 
   const applyRange = () => {
-    const from = parseInt(rangeFrom, 10);
-    const to = parseInt(rangeTo, 10);
-    if (Number.isNaN(from) || Number.isNaN(to)) return;
-    const lo = Math.min(from, to);
-    const hi = Math.max(from, to);
+    const wanted = new Set(parseRangeSpec(rangeSpec, entries.length));
+    if (wanted.size === 0) return;
+    const picked = entries.filter(e => wanted.has(e.index));
     setIncluded(prev => {
       const next = new Set(prev);
-      entries.forEach(e => { if (e.index >= lo && e.index <= hi) next.add(e.msg.id); });
+      picked.forEach(e => next.add(e.msg.id));
       return next;
     });
-    setRangeFrom(''); setRangeTo('');
+    // The checkbox: also mark branchlines for any picked message that has alternates.
+    if (rangeBranchlines) {
+      setBranchlines(prev => {
+        const next = new Set(prev);
+        picked.forEach(e => { if ((e.msg.swipes?.length ?? 0) > 1) next.add(e.msg.id); });
+        return next;
+      });
+    }
+    setRangeSpec('');
   };
 
   const q = search.trim().toLowerCase();
@@ -130,25 +136,30 @@ export const ContextZoneBuilder = ({
             className="w-full bg-app-text/5 border border-app-border rounded-md px-3 py-1.5 text-sm outline-none focus:border-accent/50"
           />
           <div className="flex flex-wrap items-center gap-2 text-xs">
-            <span className="text-muted">Quick add messages</span>
+            <span className="text-muted">Quick add by number</span>
             <input
-              type="number" min={1} value={rangeFrom}
-              onChange={(e) => setRangeFrom(e.target.value)}
-              placeholder="from #"
-              className="w-20 bg-app-text/5 border border-app-border rounded-md px-2 py-1 outline-none focus:border-accent/50"
+              type="text" value={rangeSpec}
+              onChange={(e) => setRangeSpec(e.target.value)}
+              onKeyDown={(e) => { if (e.key === 'Enter') applyRange(); }}
+              placeholder="e.g. 1-30, 45, 50-60"
+              className="w-44 bg-app-text/5 border border-app-border rounded-md px-2 py-1 outline-none focus:border-accent/50"
             />
-            <span className="text-muted">–</span>
-            <input
-              type="number" min={1} value={rangeTo}
-              onChange={(e) => setRangeTo(e.target.value)}
-              placeholder="to #"
-              className="w-20 bg-app-text/5 border border-app-border rounded-md px-2 py-1 outline-none focus:border-accent/50"
-            />
+            <label
+              className="flex items-center gap-1 cursor-pointer select-none"
+              title="Also include all alternate versions (branchlines) of any message in this range that has them"
+            >
+              <input
+                type="checkbox" checked={rangeBranchlines}
+                onChange={(e) => setRangeBranchlines(e.target.checked)}
+                className="accent-accent"
+              />
+              <GitBranch size={11} /> Branchlines
+            </label>
             <button
               onClick={applyRange}
               className="px-2.5 py-1 rounded-md border border-app-border hover:bg-app-text/5"
             >
-              Add range
+              Add
             </button>
             <input
               type="text" value={search}

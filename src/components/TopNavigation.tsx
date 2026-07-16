@@ -9,6 +9,7 @@ import { wordsPerSecond } from '../hooks/useStreamer';
 import { ViewMode } from '../types';
 import { cn } from '../utils/cn';
 import { resolveContent } from '../utils/lens';
+import { buildSearchIndex, searchStory, SearchHit } from '../utils/storySearch';
 
 const VIEW_BUTTONS: { mode: ViewMode; icon: React.ReactNode; label: string }[] = [
   { mode: 'storybook', icon: <BookOpen size={18} />, label: 'Storybook' },
@@ -47,6 +48,10 @@ export const TopNavigation = () => {
   const lensOn = !!storyId && !!lensOnByStory[storyId];
   const hasOverrides = overrides.length > 0;
   const managerRef = useRef<HTMLDivElement>(null);
+  const jumpToMessage = useAppStore(s => s.jumpToMessage);
+  const searchRef = useRef<HTMLDivElement>(null);
+  const [searchFocused, setSearchFocused] = useState(false);
+  const [debouncedQuery, setDebouncedQuery] = useState('');
 
   // Close the lens manager when clicking outside it.
   useEffect(() => {
@@ -85,6 +90,51 @@ export const TopNavigation = () => {
     const remaining = cumWords[cumWords.length - 1] - cumWords[Math.max(0, read)];
     return Math.round(remaining / (wordsPerSecond(playbackSpeed) * 60));
   }, [cumWords, chains, currentChainIndex, currentMessageIndex, streaming, playbackSpeed]);
+
+  // Full-story search: index every message once per story (resolved through
+  // Lens), then substring-search on a debounced query so keystrokes stay cheap.
+  const searchIndex = useMemo(() => {
+    if (!currentStory) return [];
+    const items = chains.flatMap((c, ci) =>
+      c.messages.map((m, mi) => ({
+        id: m.id, name: m.name, content: resolveContent(m, overrides, lensOn),
+        chainIndex: ci, messageIndex: mi,
+      })));
+    return buildSearchIndex(items);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [chains, overrides, lensOn, currentStory?.id]);
+
+  useEffect(() => {
+    const t = setTimeout(() => setDebouncedQuery(searchQuery), 220);
+    return () => clearTimeout(t);
+  }, [searchQuery]);
+
+  const hits = useMemo(
+    () => searchStory(searchIndex, debouncedQuery),
+    [searchIndex, debouncedQuery],
+  );
+
+  // Close the results dropdown on an outside click.
+  useEffect(() => {
+    if (!searchFocused) return;
+    const handler = (e: MouseEvent) => {
+      if (searchRef.current && !searchRef.current.contains(e.target as Node)) {
+        setSearchFocused(false);
+      }
+    };
+    document.addEventListener('mousedown', handler);
+    return () => document.removeEventListener('mousedown', handler);
+  }, [searchFocused]);
+
+  const gotoHit = (hit: SearchHit) => {
+    jumpToMessage(hit.id);
+    // Clear the query so the reader shows the destination in full context
+    // rather than the filtered-to-matches view.
+    setSearchQuery('');
+    setSearchFocused(false);
+  };
+
+  const showResults = searchFocused && debouncedQuery.trim().length >= 2;
 
   return (
     <div className="sticky top-0 z-40 flex items-center justify-between gap-3 px-4 py-3 border-b border-app-border bg-surface/85 backdrop-blur-md">
@@ -127,16 +177,47 @@ export const TopNavigation = () => {
       </div>
 
       <div className="flex items-center gap-2 shrink-0">
-        <div className="relative hidden sm:block">
+        <div className="relative hidden sm:block" ref={searchRef}>
           <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 opacity-50" size={14} />
           <input
             id="search-input"
             type="text"
-            placeholder="Search…"
+            placeholder="Search story…"
             value={searchQuery}
             onChange={(e) => setSearchQuery(e.target.value)}
-            className="pl-8 pr-3 py-1.5 text-sm bg-app-text/5 border border-transparent rounded-full focus:outline-none focus:border-accent/50 w-40 focus:w-52 transition-all"
+            onFocus={() => setSearchFocused(true)}
+            onKeyDown={(e) => { if (e.key === 'Escape') { setSearchFocused(false); (e.target as HTMLInputElement).blur(); } }}
+            className="pl-8 pr-3 py-1.5 text-sm bg-app-text/5 border border-transparent rounded-full focus:outline-none focus:border-accent/50 w-40 focus:w-64 transition-all"
           />
+          {showResults && (
+            <div className="absolute right-0 top-full mt-2 w-[22rem] max-h-[65vh] overflow-y-auto rounded-xl bg-surface border border-app-border shadow-2xl z-50">
+              <div className="sticky top-0 px-3 py-2 text-[11px] font-medium text-muted bg-surface/95 border-b border-app-border/60">
+                {hits.length === 0
+                  ? 'No matches in this story'
+                  : `${hits.length}${hits.length >= 60 ? '+' : ''} match${hits.length === 1 ? '' : 'es'} across the story`}
+              </div>
+              {hits.map(hit => (
+                <button
+                  key={hit.id}
+                  onClick={() => gotoHit(hit)}
+                  className="w-full text-left px-3 py-2 border-b border-app-border/40 last:border-0 hover:bg-app-text/5 transition-colors"
+                >
+                  <div className="flex items-center gap-2 mb-0.5">
+                    <span className="text-[11px] font-bold truncate">{hit.name || 'Passage'}</span>
+                    <span className="text-[10px] text-muted shrink-0 ml-auto font-mono">
+                      §{hit.chainIndex + 1}
+                      {hit.count > 1 && ` · ${hit.count}×`}
+                    </span>
+                  </div>
+                  <p className="text-[11px] leading-snug opacity-80 line-clamp-2">
+                    {hit.pre}
+                    <mark className="bg-accent/30 text-app-text rounded-sm px-0.5">{hit.hit}</mark>
+                    {hit.post}
+                  </p>
+                </button>
+              ))}
+            </div>
+          )}
         </div>
         <button
           onClick={() => setMultiverseOpen(true)}
