@@ -2,11 +2,15 @@ import React, { useMemo, useRef, useState } from 'react';
 import {
   AlignLeft, Clapperboard, Download, FileText, Focus, ImageIcon, LayoutTemplate, Loader2, MessageSquareQuote,
   Music2, PauseCircle, Play, PlayCircle, Quote, RefreshCw, Save, Sparkles, Square, Terminal, Trash2, Type,
-  UserRound, Volume2, X, ZoomIn,
+  UserRound, Volume2, Wand2, X, ZoomIn,
 } from 'lucide-react';
 import { useAppStore } from '../store';
 import { useAuraV2Store } from '../stores/useAuraV2Store';
 import { useSceneDirectorStore } from '../stores/useSceneDirectorStore';
+import { useFontStore } from '../stores/useFontStore';
+import { useSpriteStore } from '../stores/useSpriteStore';
+import { useBackdropStore } from '../stores/useBackdropStore';
+import { EMOTION_BUCKETS, EmotionBucket } from '../lib/spriteStorage';
 import { directorCoverage, enrichAll, stopEnrich } from '../utils/sceneDirectorRunner';
 import { ttsSupported, useVoices } from '../hooks/useTTS';
 import { KNOWN_KOKORO_VOICES, kokoroSpeak, listKokoroVoices } from '../utils/kokoro';
@@ -84,6 +88,146 @@ const ExportWithEditsButton = ({ story }: { story: import('../types').Story }) =
       <Download size={16} />
       <span>Export with edits applied ({overrides.length})</span>
     </button>
+  );
+};
+
+/**
+ * Stage backdrops: scene images keyed by a location word ("forest", "tavern",
+ * a mood like "ominous", or "default"). The Director's location read picks
+ * the matching backdrop on the Stage.
+ */
+const BackdropSection = () => {
+  const backdrops = useBackdropStore(s => s.backdrops);
+  const urls = useBackdropStore(s => s.urls);
+  const addBackdrop = useBackdropStore(s => s.addBackdrop);
+  const removeBackdrop = useBackdropStore(s => s.removeBackdrop);
+  const bdError = useBackdropStore(s => s.error);
+  const [keyword, setKeyword] = useState('');
+  const fileRef = useRef<HTMLInputElement>(null);
+
+  return (
+    <Section title="Stage backdrops">
+      <div className="flex items-center gap-2 text-xs">
+        <input
+          type="text"
+          value={keyword}
+          onChange={(e) => setKeyword(e.target.value)}
+          placeholder="location word… (forest, tavern, default)"
+          className="flex-1 min-w-0 bg-app-text/5 border border-app-border rounded-md px-2 py-1.5 outline-none focus:border-accent/50"
+        />
+        <button
+          onClick={() => { if (keyword.trim()) fileRef.current?.click(); }}
+          disabled={!keyword.trim()}
+          className="px-2.5 py-1.5 rounded-md bg-accent/15 text-accent font-medium hover:bg-accent/25 disabled:opacity-40"
+        >
+          Upload
+        </button>
+        <input
+          ref={fileRef}
+          type="file"
+          accept="image/png,image/webp,image/jpeg"
+          className="hidden"
+          onChange={(e) => {
+            const f = e.target.files?.[0];
+            if (f && keyword.trim()) { void addBackdrop(keyword, f); setKeyword(''); }
+            e.target.value = '';
+          }}
+        />
+      </div>
+      {bdError && <span className="text-[11px] text-red-400">{bdError}</span>}
+      {backdrops.length > 0 && (
+        <div className="flex flex-wrap gap-2">
+          {backdrops.map(b => (
+            <div key={b.id} className="relative group w-20">
+              <img src={urls[b.id]} alt={b.keyword} className="w-20 h-12 object-cover rounded-md border border-app-border" />
+              <span className="block text-center text-[9px] text-muted truncate">{b.keyword}</span>
+              <button
+                onClick={() => void removeBackdrop(b.id)}
+                className="absolute -top-1.5 -right-1.5 hidden group-hover:flex w-4 h-4 items-center justify-center rounded-full bg-red-500 text-white text-[9px]"
+              >
+                ×
+              </button>
+            </div>
+          ))}
+        </div>
+      )}
+      <span className="text-[11px] text-muted">
+        When the Scene Director places a scene somewhere whose name contains
+        your word, that image becomes the Stage's background — “forest.png as
+        the forest” with zero setup. A “default” backdrop covers the rest.
+      </span>
+    </Section>
+  );
+};
+
+/**
+ * Compact per-character expression slots, shown right under a character's
+ * profile-picture row. One image per feeling; on the Stage, the Director's
+ * read swaps the character to the matching expression.
+ */
+const ExpressionStrip = ({ character, spriteKey }: { character: string; spriteKey?: string }) => {
+  const sprites = useSpriteStore(s => s.sprites);
+  const urls = useSpriteStore(s => s.urls);
+  const addSprite = useSpriteStore(s => s.addSprite);
+  const removeSprite = useSpriteStore(s => s.removeSprite);
+  const fileRef = useRef<HTMLInputElement>(null);
+  const [pending, setPending] = useState<EmotionBucket | null>(null);
+
+  // The storage key can be namespaced (the reader's own sprites live under
+  // "user:<name>") so two rows can never share a set by accident.
+  const storeAs = spriteKey ?? character;
+  const key = storeAs.trim().toLowerCase();
+  const bySlot = new Map(sprites.filter(s => s.character === key).map(s => [s.emotion, s]));
+
+  return (
+    <div className="flex items-center gap-1.5 pl-[3.25rem] -mt-1">
+      <span className="text-[9px] uppercase tracking-wider text-muted mr-0.5">
+        Stage · {character}
+      </span>
+      {EMOTION_BUCKETS.map(b => {
+        const sprite = bySlot.get(b);
+        return (
+          <div key={b} className="relative group shrink-0">
+            <button
+              title={sprite
+                ? `${character} · ${b} — click to replace, × to remove`
+                : `Upload ${character}'s "${b}" expression for the Stage`}
+              onClick={() => { setPending(b); fileRef.current?.click(); }}
+              onContextMenu={(e) => { e.preventDefault(); if (sprite) void removeSprite(sprite.id); }}
+              className={cn(
+                'w-6 h-6 rounded-md overflow-hidden border flex items-center justify-center text-[8px]',
+                sprite ? 'border-accent/60' : 'border-app-border border-dashed opacity-50 hover:opacity-100',
+              )}
+            >
+              {sprite
+                ? <img src={urls[sprite.id]} alt={b} className="w-full h-full object-cover" />
+                : b[0].toUpperCase()}
+            </button>
+            {sprite && (
+              <button
+                title={`Remove ${character}'s "${b}" expression`}
+                onClick={() => void removeSprite(sprite.id)}
+                className="absolute -top-1.5 -right-1.5 hidden group-hover:flex w-3.5 h-3.5 items-center justify-center rounded-full bg-red-500 text-white text-[8px] leading-none z-10"
+              >
+                ×
+              </button>
+            )}
+          </div>
+        );
+      })}
+      <input
+        ref={fileRef}
+        type="file"
+        accept="image/png,image/webp,image/jpeg,image/gif"
+        className="hidden"
+        onChange={(e) => {
+          const f = e.target.files?.[0];
+          if (f && pending) void addSprite(storeAs, pending, f);
+          setPending(null);
+          e.target.value = '';
+        }}
+      />
+    </div>
   );
 };
 
@@ -272,6 +416,18 @@ const KokoroSettings = () => {
           </div>
         )}
       </div>
+
+      <Toggle
+        icon={<UserRound size={15} />}
+        label="Auto-cast side characters"
+        value={store.autoCastVoices}
+        onChange={store.setAutoCastVoices}
+      />
+      <p className="text-[11px] text-muted leading-snug -mt-1">
+        Give each unassigned side character its own distinct voice automatically. The narrator and
+        the main character keep the voices above.
+      </p>
+
       <p className="text-[11px] text-muted leading-snug">
         Run <a href="https://github.com/remsky/Kokoro-FastAPI" className="text-accent underline">Kokoro-FastAPI</a> locally
         (default <code>:8880</code>). Voices are sent per speaker as the reader streams.
@@ -375,6 +531,10 @@ const SceneDirectorSection = () => {
   const setSceneSoundscapes = useAppStore(s => s.setSceneSoundscapes);
   const emotionalTts = useAppStore(s => s.emotionalTts);
   const setEmotionalTts = useAppStore(s => s.setEmotionalTts);
+  const sceneEmphasis = useAppStore(s => s.sceneEmphasis);
+  const setSceneEmphasis = useAppStore(s => s.setSceneEmphasis);
+  const aiRepairFormatting = useAppStore(s => s.aiRepairFormatting);
+  const setAiRepairFormatting = useAppStore(s => s.setAiRepairFormatting);
   const running = useSceneDirectorStore(s => s.running);
   const done = useSceneDirectorStore(s => s.done);
   const total = useSceneDirectorStore(s => s.total);
@@ -444,13 +604,30 @@ const SceneDirectorSection = () => {
             value={emotionalTts}
             onChange={setEmotionalTts}
           />
+          <Toggle
+            icon={<Sparkles size={16} />}
+            label="Emphasize whisper / shout words"
+            value={sceneEmphasis}
+            onChange={setSceneEmphasis}
+          />
+          <Toggle
+            icon={<Wand2 size={16} />}
+            label="Repair broken formatting (AI)"
+            value={aiRepairFormatting}
+            onChange={setAiRepairFormatting}
+          />
           <span className="text-[11px] text-muted">
-            Reads each passage's mood, location, and emphasis so the reader can
-            adapt to the scene. The current page reads automatically; “Enrich
-            all” does the rest. Edited passages are re-read on their own.
+            The Director reads each passage's mood, location, and feeling so the
+            reader can adapt to the scene. The current page reads automatically;
+            “Enrich all” does the rest. Edited passages are re-read on their own.
             Theming tints the page to the scene's mood; soundscapes pick the
             ambient bed from it (needs ambient audio on); emotional narration
-            shapes the TTS voice by the speaker's feeling (needs TTS on).
+            shapes the TTS voice by the speaker's feeling (needs TTS on). Word
+            emphasis italicizes/bolds individual whispered or shouted words — it's
+            off by default because it can read as scattered styling. Formatting
+            repair asks the AI to close cut-off dialogue and emphasis where they
+            naturally end; each fix is an undoable Lens edit, and only the
+            markup characters can change — never the words.
           </span>
         </>
       )}
@@ -462,6 +639,11 @@ export const SettingsPanel = ({ onOpenAutoFormat }: { onOpenAutoFormat: () => vo
   const store = useAppStore();
   const [configName, setConfigName] = useState('');
   const voices = useVoices();
+  const customFonts = useFontStore(s => s.fonts);
+  const addFont = useFontStore(s => s.addFont);
+  const removeFont = useFontStore(s => s.removeFont);
+  const fontError = useFontStore(s => s.error);
+  const fontInputRef = useRef<HTMLInputElement>(null);
 
   if (!store.settingsOpen) return null;
 
@@ -533,6 +715,7 @@ export const SettingsPanel = ({ onOpenAutoFormat }: { onOpenAutoFormat: () => vo
               value={store.fontFamily}
               onChange={(v) => store.setFontFamily(v as any)}
               options={[
+                { value: 'theme', label: 'Theme default' },
                 { value: 'sans', label: 'Sans-serif' },
                 { value: 'serif', label: 'Serif' },
                 { value: 'mono', label: 'Monospace' },
@@ -543,8 +726,48 @@ export const SettingsPanel = ({ onOpenAutoFormat }: { onOpenAutoFormat: () => vo
                 { value: 'medieval', label: 'Medieval' },
                 { value: 'comic', label: 'Comic' },
                 { value: 'dyslexic', label: 'OpenDyslexic' },
+                ...customFonts.map(f => ({ value: `custom:${f.id}`, label: `${f.name} (yours)` })),
               ]}
             />
+            <div className="flex flex-col gap-1.5 pl-24 -mt-1">
+              <input
+                ref={fontInputRef}
+                type="file"
+                accept=".ttf,.otf,.woff,.woff2,font/ttf,font/otf,font/woff,font/woff2"
+                className="hidden"
+                onChange={(e) => {
+                  const file = e.target.files?.[0];
+                  if (file) void addFont(file).then(() => store.setFontFamily(`custom:${useFontStore.getState().fonts.at(-1)!.id}`)).catch(() => {});
+                  e.target.value = '';
+                }}
+              />
+              <button
+                onClick={() => fontInputRef.current?.click()}
+                className="self-start flex items-center gap-1.5 text-xs px-2.5 py-1.5 rounded-lg border border-app-border hover:bg-app-text/5 transition-colors"
+              >
+                <Type size={13} /> Upload font (.ttf/.otf/.woff)
+              </button>
+              {fontError && <p className="text-[11px] text-red-500 leading-snug">{fontError}</p>}
+              {customFonts.length > 0 && (
+                <div className="flex flex-col gap-1">
+                  {customFonts.map(f => (
+                    <div key={f.id} className="flex items-center justify-between text-xs bg-app-text/5 rounded-md px-2 py-1">
+                      <span style={{ fontFamily: `"${f.family}", var(--font-sans)` }} className="truncate">{f.name}</span>
+                      <button
+                        onClick={() => {
+                          if (store.fontFamily === `custom:${f.id}`) store.setFontFamily('theme');
+                          void removeFont(f.id);
+                        }}
+                        className="p-1 rounded hover:bg-red-500/10 text-muted hover:text-red-500 transition-colors shrink-0"
+                        title={`Remove ${f.name}`}
+                      >
+                        <Trash2 size={13} />
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
             <div className="flex items-center gap-2 bg-app-text/5 px-3 rounded-lg justify-between py-1.5 text-sm">
               <span>Font Size</span>
               <div className="flex items-center gap-3">
@@ -589,6 +812,17 @@ export const SettingsPanel = ({ onOpenAutoFormat }: { onOpenAutoFormat: () => vo
               value={store.themeEffects}
               onChange={store.setThemeEffects}
             />
+            <Toggle
+              icon={<Sparkles size={16} />}
+              label="Living background"
+              value={store.livingBackground}
+              onChange={store.setLivingBackground}
+            />
+            <span className="text-[11px] text-muted -mt-1">
+              A gentle animated backdrop suited to the theme — drifting motes,
+              embers, petals, stars, or rain. Needs ambient effects on; pauses
+              when your system prefers reduced motion.
+            </span>
           </Section>
 
           <Section title="Reveal Animation">
@@ -985,10 +1219,21 @@ export const SettingsPanel = ({ onOpenAutoFormat }: { onOpenAutoFormat: () => vo
                 value={store.currentStory.userAvatar}
                 onPick={(url) => store.setStoryAvatar('user', url)}
               />
+              <ExpressionStrip
+                character={store.currentStory.userName || 'You'}
+                spriteKey={`user:${store.currentStory.userName || 'You'}`}
+              />
               <AvatarUpload
                 label="Default character picture"
                 value={store.currentStory.characterAvatar ?? store.currentStory.avatar}
                 onPick={(url) => store.setStoryAvatar('character', url)}
+              />
+              <ExpressionStrip
+                character={
+                  store.currentStory.characterName
+                    ?? store.currentStory.messages.find(m => m.role !== 'user')?.name
+                    ?? 'Story'
+                }
               />
               {(() => {
                 const names = Array.from(new Set(
@@ -1003,21 +1248,28 @@ export const SettingsPanel = ({ onOpenAutoFormat }: { onOpenAutoFormat: () => vo
                     <div className="h-px bg-app-border/60 my-1" />
                     <span className="text-[11px] text-muted">Per-character overrides</span>
                     {names.map(name => (
-                      <AvatarUpload
-                        key={name}
-                        label={name}
-                        value={store.currentStory!.characterAvatars?.[name] ?? fallback}
-                        onPick={(url) => store.setCharacterAvatar(name, url)}
-                      />
+                      <React.Fragment key={name}>
+                        <AvatarUpload
+                          label={name}
+                          value={store.currentStory!.characterAvatars?.[name] ?? fallback}
+                          onPick={(url) => store.setCharacterAvatar(name, url)}
+                        />
+                        <ExpressionStrip character={name} />
+                      </React.Fragment>
                     ))}
                   </>
                 );
               })()}
               <span className="text-[11px] text-muted">
-                Shown beside messages in Chat &amp; Phone views. Saved with this story.
+                Shown beside messages in Chat &amp; Phone views; saved with this
+                story. The small “Stage” slots hold expression images per
+                feeling — the Scene Director swaps them live on the Stage
+                (click to set or replace, hover for ×, or right-click to clear).
               </span>
             </Section>
           )}
+
+          <BackdropSection />
 
           {store.theme === 'phone' && (
             <Section title="Phone View">

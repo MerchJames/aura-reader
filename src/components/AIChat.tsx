@@ -89,7 +89,7 @@ const buildContext = (opts: ContextOpts): string => {
       body = '(No context zone selected.)';
       scopeLine = 'The reader has not selected a context zone yet.';
     } else {
-      const built = buildZoneBody(zone, chains, resolve);
+      const built = buildZoneBody(zone, chains, resolve, currentStory?.timelines ?? []);
       body = built.empty ? '(The selected context zone is empty.)' : built.body;
       scopeLine = built.empty
         ? `The reader's context zone "${zone.name}" is currently empty.`
@@ -1056,7 +1056,7 @@ export const AIChat = () => {
                   >
                     {zoneList.map(z => (
                       <option key={z.id} value={z.id} className="text-black bg-white">
-                        {z.name}{store.chains.length ? ` — ${zoneSummary(z, store.chains)}` : ''}
+                        {z.name}{store.chains.length ? ` — ${zoneSummary(z, store.chains, store.currentStory?.timelines ?? [])}` : ''}
                       </option>
                     ))}
                   </select>

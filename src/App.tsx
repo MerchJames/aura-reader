@@ -2,6 +2,9 @@ import React, { lazy, Suspense, useEffect, useState } from 'react';
 import { TopNavigation } from './components/TopNavigation';
 import { PlaybackControls } from './components/PlaybackControls';
 import { ReaderDisplay } from './components/ReaderDisplay';
+import { BookView } from './components/BookView';
+import { StageView } from './components/StageView';
+import { VNView } from './components/VNView';
 import { OverviewMode } from './components/OverviewMode';
 import { HighlightsMode } from './components/HighlightsMode';
 import { BranchesMode } from './components/BranchesMode';
@@ -10,12 +13,16 @@ import { AutoFormatModal } from './components/AutoFormatModal';
 // AI panel pulls in KaTeX — load it only when opened.
 const AIChat = lazy(() => import('./components/AIChat').then(m => ({ default: m.AIChat })));
 import { SettingsPanel } from './components/SettingsPanel';
+import { LivingBackground } from './components/LivingBackground';
 import { Library } from './components/Library';
 import { useStreamer } from './hooks/useStreamer';
 import { useTTS } from './hooks/useTTS';
 import { useAmbient } from './hooks/useAmbient';
 import { useKeyboardShortcuts } from './hooks/useKeyboardShortcuts';
 import { useAppStore } from './store';
+import { customFamilyFor, useFontStore } from './stores/useFontStore';
+import { useSpriteStore } from './stores/useSpriteStore';
+import { useBackdropStore } from './stores/useBackdropStore';
 import { accentHex, resolveTheme } from './themes';
 import { cn } from './utils/cn';
 
@@ -48,11 +55,18 @@ export default function App() {
   const themeEffects = useAppStore(s => s.themeEffects);
   const initLibrary = useAppStore(s => s.initLibrary);
   const aiOpen = useAppStore(s => s.aiOpen);
+  const loadFonts = useFontStore(s => s.loadFonts);
+  const loadSprites = useSpriteStore(s => s.loadSprites);
+  const loadBackdrops = useBackdropStore(s => s.loadBackdrops);
+  const customFonts = useFontStore(s => s.fonts);
   const [showAutoFormat, setShowAutoFormat] = useState(false);
 
   useEffect(() => {
     void initLibrary();
-  }, [initLibrary]);
+    void loadFonts();
+    void loadSprites();
+    void loadBackdrops();
+  }, [initLibrary, loadFonts, loadSprites, loadBackdrops]);
 
   const themeDef = resolveTheme(theme, bgColor, textColor);
 
@@ -70,17 +84,27 @@ export default function App() {
     root.style.setProperty('--bubble-user-text', themeDef.vars.bubbleUserText);
   }, [themeDef, accentColor]);
 
-  const effectiveFont = themeDef.font ?? fontFamily;
+  // 'theme' = follow the theme's signature font; anything else is the
+  // reader's explicit choice and wins on every theme.
+  const effectiveFont = fontFamily === 'theme' ? (themeDef.font ?? 'sans') : fontFamily;
+  // A user-uploaded font is applied inline (it has no Tailwind class); built-in
+  // fonts use their utility class. Falls back cleanly if the custom id is gone.
+  const customFamily = customFamilyFor(effectiveFont, customFonts);
 
   return (
     <div
       className={cn(
         'h-screen flex flex-col bg-app-bg text-app-text transition-colors duration-500',
-        FONT_CLASS[effectiveFont] ?? 'font-sans',
+        customFamily ? 'font-sans' : (FONT_CLASS[effectiveFont] ?? 'font-sans'),
+        // Marks "reader follows the theme" — lets themes with a strong
+        // identity (pixel faces) apply their own without fighting a choice.
+        fontFamily === 'theme' && !customFamily && 'stock-font',
         themeDef.rootClass,
         !themeEffects && 'no-effects',
       )}
+      style={customFamily ? { fontFamily: `"${customFamily}", var(--font-sans)` } : undefined}
     >
+      <LivingBackground />
       {screen === 'library' ? (
         <Library />
       ) : (
@@ -92,6 +116,12 @@ export default function App() {
             <HighlightsMode />
           ) : viewMode === 'branches' ? (
             <BranchesMode />
+          ) : viewMode === 'book' ? (
+            <BookView />
+          ) : viewMode === 'stage' ? (
+            <StageView />
+          ) : viewMode === 'vn' ? (
+            <VNView />
           ) : (
             <ReaderDisplay />
           )}

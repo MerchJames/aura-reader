@@ -48,6 +48,6 @@ export const deleteStory = async (id: string): Promise<void> => {
 export const getAllStoryMetas = async (): Promise<StoryMeta[]> => {
   const stories: Story[] = await request((await tx('readonly')).getAll());
   return stories
-    .map(({ messages: _m, highlights: _h, stars: _s, ...meta }) => meta)
+    .map(({ messages: _m, highlights: _h, stars: _s, timelines: _t, ...meta }) => meta)
     .sort((a, b) => b.importedAt - a.importedAt);
 };

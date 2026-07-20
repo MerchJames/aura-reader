@@ -40,6 +40,11 @@ html {
 body {
   margin: 0;
   padding: 0;
+  /* Overlays that portal or mount outside the themed app root (tooltips,
+     RecapCard, codex panels...) must still read in the theme's colors —
+     without this they inherit the browser default (black on anything). */
+  background: var(--app-bg, #0f172a);
+  color: var(--app-text, #e2e8f0);
 }
 
 /* --- Theme decorations ---------------------------------------------- */
@@ -865,10 +870,103 @@ body {
 .scene-wash[data-mood="action"]     { --scene-color: #7a3320; }
 .scene-wash[data-mood="eerie"]      { --scene-color: #2f5340; }
 .scene-wash[data-mood="awe"]        { --scene-color: #276a7a; }
-@media (prefers-reduced-motion: reduce) {
-  .scene-wash { transition: none; }
+/* Scene atmosphere — assetless overlays layered with the wash, all fixed,
+   non-interactive, and below the reading column (z-10). Each is rendered only
+   when the active scene calls for it (see SceneAtmosphere.tsx). */
+.scene-light {
+  position: fixed;
+  inset: 0;
+  z-index: 0;
+  pointer-events: none;
+  background: linear-gradient(180deg, var(--light-color, transparent), transparent 62%);
+  transition: opacity 1.8s ease, background 1.8s ease;
 }
-.no-effects .scene-wash { display: none; }
+.scene-veil {
+  position: fixed;
+  inset: 0;
+  z-index: 0;
+  pointer-events: none;
+  background: #7f8aa3;
+  mix-blend-mode: saturation;
+  transition: opacity 1.8s ease;
+}
+.scene-vignette {
+  position: fixed;
+  inset: 0;
+  z-index: 0;
+  pointer-events: none;
+  box-shadow: inset 0 0 26vmin 2vmin rgba(4, 3, 10, var(--vig, 0));
+  transition: box-shadow 1.4s ease;
+}
+.scene-grain {
+  position: fixed;
+  inset: -8%;
+  z-index: 0;
+  pointer-events: none;
+  opacity: 0.05;
+  mix-blend-mode: overlay;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='150' height='150'%3E%3Cfilter id='g'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.8' numOctaves='2' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23g)'/%3E%3C/svg%3E");
+  animation: sceneGrain 1.3s steps(4) infinite;
+}
+@keyframes sceneGrain {
+  0%   { transform: translate(0, 0); }
+  25%  { transform: translate(-3%, 2%); }
+  50%  { transform: translate(2%, -3%); }
+  75%  { transform: translate(-2%, -2%); }
+  100% { transform: translate(0, 0); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .scene-wash, .scene-light, .scene-veil, .scene-vignette { transition: none; }
+  .scene-grain { animation: none; }
+}
+.no-effects .scene-wash,
+.no-effects .scene-light,
+.no-effects .scene-veil,
+.no-effects .scene-vignette,
+.no-effects .scene-grain { display: none; }
+
+/* Scene spine — a slim mood-tinted scene navigator down the left edge. */
+.scene-spine {
+  position: fixed;
+  left: 0;
+  top: 50%;
+  transform: translateY(-50%);
+  z-index: 30;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  width: 16px;
+  height: min(60vh, 500px);
+  padding: 8px 4px;
+  opacity: 0.4;
+  transition: opacity 0.25s ease;
+}
+.scene-spine:hover { opacity: 1; }
+.scene-spine button {
+  width: 4px;
+  min-height: 5px;
+  margin: 0 auto;
+  padding: 0;
+  border: none;
+  border-radius: 3px;
+  cursor: pointer;
+  background: var(--spine-c, var(--app-muted));
+  opacity: 0.55;
+  transition: width 0.16s ease, opacity 0.16s ease, background-color 0.3s ease;
+}
+.scene-spine button:hover { width: 9px; opacity: 0.95; }
+.scene-spine button[data-active="true"] { width: 10px; opacity: 1; }
+.scene-spine button:focus-visible {
+  outline: 2px solid var(--app-accent);
+  outline-offset: 2px;
+  opacity: 1;
+}
+@media (prefers-reduced-motion: reduce) {
+  .scene-spine, .scene-spine button { transition: none; }
+}
+@media (max-width: 640px) {
+  .scene-spine { display: none; }
+}
 
 @keyframes wordFade { 0% { opacity: 0; } 100% { opacity: 1; } }
 @keyframes wordBlur {
@@ -1072,3 +1170,1169 @@ body {
 .message-block[data-zoomed="true"] {
   content-visibility: visible;
 }
+
+/* --- Book view: a real two-page spread with turning leaves ------------- */
+
+.book {
+  position: relative;
+  perspective: 2400px;
+  transform-style: preserve-3d;
+  filter: drop-shadow(0 18px 34px rgba(0, 0, 0, 0.35));
+}
+
+/* One page: paper surface, inner shading toward the spine. */
+.book-page {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 50%;
+  overflow: hidden;
+  background:
+    linear-gradient(105deg, rgba(255, 255, 255, 0.05), transparent 40%),
+    var(--app-surface);
+  color: var(--app-text);
+}
+.book-single .book-page { width: 100%; border-radius: 6px; }
+.book-page-left {
+  left: 0;
+  border-radius: 8px 0 0 8px;
+  box-shadow: inset -14px 0 24px -16px rgba(0, 0, 0, 0.45);
+}
+.book-page-right {
+  right: 0;
+  border-radius: 0 8px 8px 0;
+  box-shadow: inset 14px 0 24px -16px rgba(0, 0, 0, 0.45);
+}
+
+/* The scene's mood tints the paper itself (set via --scene-tint on .book). */
+.book-page::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background: var(--scene-tint, transparent);
+  opacity: calc(var(--scene-tint-a, 0) * 1.6);
+  pointer-events: none;
+  transition: background 1.2s ease, opacity 1.2s ease;
+  z-index: 0;
+}
+.book-page > * { z-index: 1; }
+
+/* The text column. Padding must match PAD_X/PAD_TOP/PAD_BOTTOM in BookView. */
+.book-page-body {
+  position: absolute;
+  inset: 0;
+  padding: 40px 44px 52px;
+  line-height: 1.75;
+  text-align: justify;
+  hyphens: auto;
+  cursor: default;
+}
+.book-measure {
+  position: fixed !important;
+  /* Undo .book-page-body's inset:0 — with top+bottom pinned the measurer
+     would stretch to the viewport and scrollHeight could never reflect the
+     content, breaking pagination. */
+  inset: auto !important;
+  top: 0 !important;
+  left: -10000px !important;
+  height: auto !important;
+  padding: 0 !important;
+  visibility: hidden;
+  pointer-events: none;
+}
+
+.book-para { margin: 0 0 0.85em; text-indent: 1.4em; }
+.book-para:first-child, .book-chapter + .book-para, .book-break + .book-para {
+  text-indent: 0;
+}
+.book-user {
+  padding-left: 0.8em;
+  border-left: 2px solid color-mix(in srgb, var(--app-accent) 55%, transparent);
+  text-indent: 0;
+}
+.book-say { color: var(--app-accent); }
+.book-page-body code {
+  font-family: var(--font-mono, monospace);
+  font-size: 0.85em;
+  background: color-mix(in srgb, var(--app-text) 8%, transparent);
+  padding: 0.05em 0.3em;
+  border-radius: 4px;
+}
+.book-plate {
+  display: block;
+  height: 330px;
+  margin: 0.7em 0;
+  text-align: center;
+}
+.book-plate img {
+  max-width: 100%;
+  height: 100%;
+  object-fit: contain;
+  display: inline-block;
+  border-radius: 4px;
+}
+
+/* Chapter openings and scene breaks. */
+.book-chapter { margin: 1.6em 0 1.4em; text-align: center; text-indent: 0; }
+.book-orn { color: var(--orn, currentColor); font-size: 1.3em; opacity: 0.85; }
+.book-chapter-title {
+  font-variant: small-caps;
+  letter-spacing: 0.18em;
+  font-size: 1.15em;
+  margin-top: 0.35em;
+}
+.book-chapter-sub {
+  font-style: italic;
+  opacity: 0.6;
+  font-size: 0.85em;
+  margin-top: 0.15em;
+}
+.book-head {
+  text-align: center;
+  font-variant: small-caps;
+  letter-spacing: 0.12em;
+  margin: 1.2em 0 0.8em;
+  text-indent: 0;
+}
+.book-break {
+  text-align: center;
+  opacity: 0.55;
+  letter-spacing: 0.4em;
+  margin: 1.3em 0;
+  font-size: 0.8em;
+  text-indent: 0;
+}
+.book-chapter + .book-para::first-letter {
+  float: left;
+  font-size: 3.1em;
+  line-height: 0.82;
+  padding-right: 0.09em;
+  margin-top: 0.05em;
+  font-weight: 700;
+  color: var(--app-accent);
+}
+
+/* Page furniture. */
+.book-runhead {
+  position: absolute;
+  top: 14px;
+  left: 44px;
+  right: 44px;
+  text-align: center;
+  font-size: 11px;
+  letter-spacing: 0.22em;
+  text-transform: uppercase;
+  opacity: 0.4;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.book-folio {
+  position: absolute;
+  bottom: 16px;
+  left: 0;
+  right: 0;
+  text-align: center;
+  font-size: 12px;
+  opacity: 0.45;
+  font-variant-numeric: oldstyle-nums;
+}
+
+/* The gutter between the pages. */
+.book-spine {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 50%;
+  width: 34px;
+  transform: translateX(-50%);
+  pointer-events: none;
+  z-index: 2;
+  background: linear-gradient(90deg,
+    transparent, rgba(0, 0, 0, 0.22) 42%, rgba(0, 0, 0, 0.32) 50%,
+    rgba(0, 0, 0, 0.22) 58%, transparent);
+}
+
+/* Stacked page edges: read pages pile up left, unread wait on the right. */
+.book-edges {
+  position: absolute;
+  top: 3px;
+  bottom: 3px;
+  pointer-events: none;
+  transition: width 0.4s ease;
+  background: repeating-linear-gradient(90deg,
+    color-mix(in srgb, var(--app-surface) 86%, black) 0 1px,
+    color-mix(in srgb, var(--app-surface) 96%, white) 1px 3px);
+}
+.book-edges-l { right: 100%; border-radius: 4px 0 0 4px; }
+.book-edges-r { left: 100%; border-radius: 0 4px 4px 0; }
+
+/* The leaf in motion: hinged on the spine, two faces, real backface. */
+.book-leaf {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 50%;
+  width: 50%;
+  transform-style: preserve-3d;
+  transform-origin: left center;
+  z-index: 3;
+  animation-timing-function: cubic-bezier(0.45, 0.05, 0.25, 1);
+  animation-fill-mode: both;
+}
+.book-leaf-fwd { animation-name: bookLeafFwd; }
+.book-leaf-bwd { animation-name: bookLeafBwd; }
+@keyframes bookLeafFwd {
+  from { transform: rotateY(0deg); }
+  to { transform: rotateY(-180deg); }
+}
+@keyframes bookLeafBwd {
+  from { transform: rotateY(-180deg); }
+  to { transform: rotateY(0deg); }
+}
+.book-leaf-face {
+  position: absolute;
+  inset: 0;
+  backface-visibility: hidden;
+  transform-style: preserve-3d;
+}
+.book-leaf-rear { transform: rotateY(180deg); }
+/* Faces hold a full-width .book-page each. */
+.book-leaf-face .book-page { width: 100%; left: 0; right: 0; }
+/* Moving shadow across the turning leaf sells the curl. */
+.book-leaf::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  background: linear-gradient(90deg, rgba(0, 0, 0, 0.28), transparent 55%);
+  opacity: 0;
+  animation: bookLeafShade inherit;
+  animation-name: bookLeafShade;
+  animation-duration: inherit;
+  animation-timing-function: inherit;
+}
+@keyframes bookLeafShade {
+  0% { opacity: 0; }
+  45% { opacity: 0.55; }
+  100% { opacity: 0; }
+}
+
+/* Single-page turn: a quick sweep instead of a spread flip. */
+.book-single-turn {
+  position: absolute;
+  inset: 0;
+  z-index: 3;
+  pointer-events: none;
+  background: linear-gradient(100deg, transparent 30%, rgba(0, 0, 0, 0.18) 50%, transparent 70%);
+  animation-name: bookSingleTurn;
+  animation-timing-function: ease-in-out;
+}
+@keyframes bookSingleTurn {
+  from { transform: translateX(110%); opacity: 0.9; }
+  to { transform: translateX(-110%); opacity: 0.9; }
+}
+
+/* Turn arrows in the outer margins. */
+.book-nav {
+  position: absolute;
+  top: 50%;
+  transform: translateY(-50%);
+  z-index: 4;
+  padding: 10px 6px;
+  border-radius: 9999px;
+  opacity: 0.35;
+  transition: opacity 0.2s;
+  color: var(--app-text);
+}
+.book-nav:hover { opacity: 0.9; }
+.book-nav:disabled { opacity: 0.08; cursor: default; }
+.book-nav-l { left: -44px; }
+.book-nav-r { right: -44px; }
+.book-single .book-nav-l { left: -38px; }
+.book-single .book-nav-r { right: -38px; }
+
+/* Magical ink: freshly streamed words condense out of thin air. */
+.book-ink {
+  display: inline-block;
+  animation: bookInk 0.7s cubic-bezier(0.2, 0.6, 0.3, 1) both;
+}
+@keyframes bookInk {
+  0% {
+    opacity: 0;
+    filter: blur(6px);
+    transform: translateY(0.18em) scale(1.06);
+    text-shadow: 0 0 18px var(--app-accent);
+  }
+  60% {
+    opacity: 1;
+    filter: blur(1.5px);
+    text-shadow: 0 0 10px color-mix(in srgb, var(--app-accent) 45%, transparent);
+  }
+  100% {
+    opacity: 1;
+    filter: blur(0);
+    transform: none;
+    text-shadow: none;
+  }
+}
+
+/* Effects off / reduced motion: pages still turn, just without theatre. */
+.no-effects .book-leaf, .no-effects .book-single-turn,
+.no-effects .book-ink, .no-effects .book-leaf::after {
+  animation-duration: 0.01ms !important;
+}
+@media (prefers-reduced-motion: reduce) {
+  .book-leaf, .book-single-turn, .book-ink, .book-leaf::after {
+    animation-duration: 0.01ms !important;
+  }
+}
+
+/* --- RPG Quest theme: JRPG dialogue windows under an arcade sky -------- */
+
+/* Deep-space backdrop with a slow aurora sweep and a faint pixel grid. */
+.theme-rpg { position: relative; }
+.theme-rpg::before {
+  content: '';
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  z-index: -1;
+  background:
+    radial-gradient(ellipse 90% 55% at 50% -10%, rgba(255, 210, 63, 0.10), transparent 60%),
+    radial-gradient(ellipse 70% 45% at 15% 110%, rgba(112, 90, 255, 0.16), transparent 60%),
+    radial-gradient(ellipse 70% 45% at 90% 105%, rgba(56, 182, 255, 0.12), transparent 60%);
+  animation: rpgSky 16s ease-in-out infinite alternate;
+}
+.theme-rpg::after {
+  content: '';
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  z-index: -1;
+  background-image:
+    linear-gradient(rgba(141, 147, 200, 0.05) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(141, 147, 200, 0.05) 1px, transparent 1px);
+  background-size: 34px 34px;
+  mask-image: linear-gradient(to bottom, transparent 20%, black 80%);
+}
+@keyframes rpgSky {
+  from { opacity: 0.75; transform: translateY(0); }
+  to { opacity: 1; transform: translateY(-12px); }
+}
+
+/* The dialogue window: double border, inner bevel, soft key-color glow. */
+.theme-rpg .reader-bubble {
+  border: 2px solid var(--app-border);
+  border-radius: 10px;
+  box-shadow:
+    inset 0 0 0 2px rgba(13, 16, 48, 0.9),
+    inset 0 0 0 3px rgba(141, 147, 200, 0.35),
+    0 4px 18px rgba(0, 0, 0, 0.45),
+    0 0 0 1px rgba(255, 210, 63, 0.08);
+  padding-top: 1.4rem !important;
+  overflow: visible;
+}
+/* Sheen that sweeps the window every few seconds — the "alive" border. */
+.theme-rpg .reader-bubble::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  pointer-events: none;
+  background: linear-gradient(115deg,
+    transparent 30%, rgba(255, 210, 63, 0.07) 45%,
+    rgba(255, 255, 255, 0.05) 50%, transparent 62%);
+  background-size: 260% 100%;
+  animation: rpgSheen 7s ease-in-out infinite;
+}
+@keyframes rpgSheen {
+  0%, 55% { background-position: 120% 0; }
+  85%, 100% { background-position: -60% 0; }
+}
+
+/* Speaker name as the classic plate riding the window's top border. */
+.theme-rpg .reader-bubble-name {
+  position: absolute;
+  top: -11px;
+  left: 14px;
+  margin: 0 !important;
+  padding: 1px 10px;
+  border-radius: 6px;
+  background: var(--app-accent);
+  color: #1a1440;
+  opacity: 1 !important;
+  font-size: 10px;
+  letter-spacing: 0.14em;
+  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.4);
+}
+.theme-rpg .reader-bubble-name img { display: none; }
+
+/* JRPG advance cursor: bounces in the corner while the box is writing. */
+.theme-rpg .message-block[data-streaming="true"] .reader-bubble::before {
+  content: '▼';
+  position: absolute;
+  right: 10px;
+  bottom: 6px;
+  font-size: 11px;
+  color: var(--app-accent);
+  animation: rpgCursor 0.9s ease-in-out infinite;
+  pointer-events: none;
+}
+@keyframes rpgCursor {
+  0%, 100% { transform: translateY(0); opacity: 0.9; }
+  50% { transform: translateY(3px); opacity: 0.5; }
+}
+
+/* Dialogue glows like key dialogue choices. */
+.theme-rpg .markdown-body em { text-shadow: 0 0 12px rgba(255, 210, 63, 0.25); }
+
+/* Kill-switches. */
+.no-effects .theme-rpg::before, .theme-rpg.no-effects::before,
+.no-effects .theme-rpg::after, .theme-rpg.no-effects::after,
+.no-effects .theme-rpg .reader-bubble::after,
+.theme-rpg.no-effects .reader-bubble::after {
+  animation: none !important;
+}
+.theme-rpg.no-effects::before, .theme-rpg.no-effects::after { display: none; }
+@media (prefers-reduced-motion: reduce) {
+  .theme-rpg::before, .theme-rpg .reader-bubble::after,
+  .theme-rpg .message-block[data-streaming="true"] .reader-bubble::before {
+    animation: none !important;
+  }
+}
+
+/* --- Stage view: the story as a visual-novel scene --------------------- */
+
+.stage-scene { overflow: hidden; }
+/* The scene's mood glows through the stage (set via --scene-tint on .stage). */
+.stage-scene::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background: radial-gradient(ellipse 90% 70% at 50% 55%, var(--scene-tint, transparent), transparent 75%);
+  opacity: calc(var(--scene-tint-a, 0) * 2.4);
+  pointer-events: none;
+  transition: opacity 1.2s ease;
+}
+.stage-box {
+  border-color: color-mix(in srgb, var(--scene-tint, var(--app-border)) 30%, var(--app-border)) !important;
+}
+
+/* The two leads. The speaker takes the light and a step forward. */
+.stage-portrait {
+  position: absolute;
+  bottom: 0;
+  width: min(34vw, 340px);
+  height: 82%;
+  display: flex;
+  align-items: flex-end;
+  justify-content: center;
+  transition: filter 0.45s ease, transform 0.45s ease, opacity 0.45s ease;
+  pointer-events: none;
+}
+.stage-portrait img {
+  max-width: 100%;
+  max-height: 100%;
+  object-fit: contain;
+  border-radius: 12px;
+  filter: drop-shadow(0 14px 24px rgba(0, 0, 0, 0.5));
+}
+.stage-portrait-left { left: max(2vw, 12px); }
+.stage-portrait-right { right: max(2vw, 12px); }
+.stage-focus { transform: translateY(0) scale(1); filter: none; z-index: 2; }
+.stage-dim {
+  transform: translateY(10px) scale(0.94);
+  filter: brightness(0.45) saturate(0.55);
+  opacity: 0.85;
+  z-index: 1;
+}
+.stage-portrait-fallback {
+  width: 42%;
+  aspect-ratio: 1;
+  border-radius: 9999px;
+  background: var(--app-accent);
+  color: var(--app-bg);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: clamp(2rem, 6vw, 4rem);
+  font-weight: 800;
+  margin-bottom: 8%;
+  box-shadow: 0 12px 30px rgba(0, 0, 0, 0.4);
+}
+
+/* The spoken line pops over the speaker. */
+.stage-bubble {
+  position: absolute;
+  top: 9%;
+  max-width: min(46vw, 460px);
+  padding: 0.7rem 1rem;
+  border-radius: 16px;
+  background: var(--app-surface);
+  border: 1.5px solid var(--app-border);
+  color: var(--app-text);
+  font-size: 0.95rem;
+  line-height: 1.5;
+  box-shadow: 0 10px 28px rgba(0, 0, 0, 0.35);
+  animation: stagePop 0.22s cubic-bezier(0.2, 0.9, 0.3, 1.3) both;
+  z-index: 3;
+}
+.stage-bubble::after {
+  content: '';
+  position: absolute;
+  bottom: -8px;
+  width: 14px;
+  height: 14px;
+  background: inherit;
+  border-right: 1.5px solid var(--app-border);
+  border-bottom: 1.5px solid var(--app-border);
+  transform: rotate(45deg);
+}
+.stage-bubble-left { left: clamp(60px, 11vw, 260px); border-bottom-left-radius: 4px; }
+.stage-bubble-left::after { left: 26px; }
+.stage-bubble-right { right: clamp(60px, 11vw, 260px); border-bottom-right-radius: 4px; }
+.stage-bubble-right::after { right: 26px; }
+@keyframes stagePop {
+  from { opacity: 0; transform: translateY(8px) scale(0.92); }
+  to { opacity: 1; transform: translateY(0) scale(1); }
+}
+
+/* The big JRPG textbox. */
+.stage-box {
+  max-width: 900px;
+  min-height: 7.5rem;
+  max-height: 32vh;
+  border-radius: 12px;
+  border: 2px solid var(--app-border);
+  background: var(--bubble-ai);
+  box-shadow: 0 10px 34px rgba(0, 0, 0, 0.45);
+  padding: 1.35rem 1.25rem 1rem;
+  cursor: pointer;
+}
+.stage-nameplate {
+  position: absolute;
+  top: -12px;
+  left: 16px;
+  padding: 2px 12px;
+  border-radius: 7px;
+  background: var(--app-accent);
+  color: var(--app-bg);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.4);
+}
+.stage-text {
+  max-height: calc(32vh - 3.5rem);
+  overflow-y: auto;
+  line-height: 1.65;
+}
+.stage-text p { margin: 0 0 0.6em; }
+.stage-text p:last-child { margin-bottom: 0; }
+.stage-cursor {
+  position: absolute;
+  right: 12px;
+  bottom: 8px;
+  font-size: 11px;
+  color: var(--app-accent);
+  animation: rpgCursor 0.9s ease-in-out infinite;
+  pointer-events: none;
+}
+
+.no-effects .stage-bubble { animation: none; }
+@media (prefers-reduced-motion: reduce) {
+  .stage-bubble, .stage-cursor { animation: none !important; }
+  .stage-portrait { transition: none; }
+}
+
+/* --- Pixel Chat: a GBA-era comm device ---------------------------------- */
+.theme-pixelchat { position: relative; }
+.theme-pixelchat::before {
+  content: '';
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  z-index: -1;
+  background-image:
+    radial-gradient(rgba(77, 227, 193, 0.10) 1px, transparent 1px),
+    radial-gradient(rgba(77, 227, 193, 0.06) 1px, transparent 1px);
+  background-size: 22px 22px, 22px 22px;
+  background-position: 0 0, 11px 11px;
+  animation: pixelDrift 22s linear infinite;
+}
+@keyframes pixelDrift {
+  from { background-position: 0 0, 11px 11px; }
+  to { background-position: 0 -220px, 11px -209px; }
+}
+/* Pixel window: hard corners drawn with stacked shadows, no curves. */
+.theme-pixelchat .reader-bubble, .theme-pixelchat .stage-box, .theme-pixelchat .stage-bubble {
+  border-radius: 0 !important;
+  border: 0 !important;
+  box-shadow:
+    0 0 0 2px var(--app-border),
+    0 0 0 4px var(--app-bg),
+    0 0 0 6px var(--app-border),
+    0 6px 0 6px rgba(0, 0, 0, 0.35);
+  image-rendering: pixelated;
+}
+.theme-pixelchat .stage-bubble::after { display: none; }
+.theme-pixelchat .reader-bubble-name,
+.theme-pixelchat .stage-nameplate {
+  border-radius: 0;
+  text-transform: uppercase;
+  letter-spacing: 0.2em;
+}
+.theme-pixelchat .stage-portrait img { image-rendering: pixelated; border-radius: 0; }
+
+/* --- Pixel RPG: the classic royal-blue command window ------------------- */
+.theme-pixelrpg { position: relative; }
+.theme-pixelrpg::before {
+  content: '';
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  z-index: -1;
+  background:
+    linear-gradient(180deg, #060a26 0%, #0d1440 55%, #1a2160 100%);
+}
+.theme-pixelrpg .reader-bubble, .theme-pixelrpg .stage-box, .theme-pixelrpg .stage-bubble {
+  border-radius: 6px !important;
+  border: 2px solid #eef2ff !important;
+  outline: 2px solid #4a5aa8;
+  outline-offset: -5px;
+  background: linear-gradient(180deg, #2a3fb0 0%, #16226f 60%, #101b6b 100%) !important;
+  color: #f4f6ff;
+  box-shadow: 0 6px 22px rgba(0, 0, 0, 0.5);
+}
+.theme-pixelrpg .stage-bubble::after {
+  background: #16226f;
+  border-color: #eef2ff;
+  border-width: 2px;
+}
+.theme-pixelrpg .reader-bubble-name, .theme-pixelrpg .stage-nameplate {
+  background: #eef2ff;
+  color: #101b6b;
+  border-radius: 3px;
+  text-transform: uppercase;
+  letter-spacing: 0.18em;
+}
+.theme-pixelrpg .stage-portrait img { image-rendering: pixelated; border-radius: 4px; }
+.theme-pixelrpg .markdown-body em { color: #ffe9a8; }
+
+/* --- Snek Comms: the codec call ----------------------------------------- */
+.theme-snek { position: relative; }
+.theme-snek::before {
+  content: '';
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  z-index: -1;
+  background:
+    radial-gradient(ellipse 80% 60% at 50% 40%, rgba(60, 130, 80, 0.12), transparent 70%);
+  animation: snekHum 4s ease-in-out infinite alternate;
+}
+@keyframes snekHum { from { opacity: 0.7; } to { opacity: 1; } }
+.theme-snek .reader-bubble, .theme-snek .stage-box, .theme-snek .stage-bubble {
+  border-radius: 2px !important;
+  border: 1px solid var(--app-border) !important;
+  box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.8), 0 0 18px rgba(70, 160, 90, 0.15);
+}
+.theme-snek .stage-bubble::after { border-width: 1px; }
+.theme-snek .reader-bubble-name, .theme-snek .stage-nameplate {
+  background: transparent;
+  color: var(--app-accent);
+  border: 1px solid var(--app-border);
+  border-radius: 2px;
+  letter-spacing: 0.3em;
+}
+/* Everyone on the codec is green — portraits run through the phosphor. */
+.theme-snek .stage-portrait img {
+  filter: grayscale(1) sepia(1) hue-rotate(65deg) saturate(1.6) brightness(0.85)
+    contrast(1.15) drop-shadow(0 10px 20px rgba(0, 0, 0, 0.6));
+  border-radius: 2px;
+  border: 1px solid var(--app-border);
+}
+.theme-snek .stage-portrait-fallback {
+  background: #0a1f12;
+  color: var(--app-accent);
+  border: 1px solid var(--app-border);
+  border-radius: 2px;
+}
+.theme-snek .markdown-body em { color: #d8ffd8; text-shadow: 0 0 10px rgba(120, 255, 150, 0.3); }
+
+.no-effects .theme-pixelchat::before, .theme-pixelchat.no-effects::before,
+.no-effects .theme-snek::before, .theme-snek.no-effects::before {
+  animation: none !important;
+}
+@media (prefers-reduced-motion: reduce) {
+  .theme-pixelchat::before, .theme-snek::before { animation: none !important; }
+}
+
+/* Stage CG: an image attached to the passage takes center stage. */
+.stage-cg {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  transform: translate(-50%, -50%);
+  z-index: 2;
+  cursor: zoom-in;
+  /* Own keyframes: a shared pop animation's final transform would override
+     the centering translate (fill-mode both replaces the transform). */
+  animation: stageCgPop 0.3s ease-out both;
+}
+@keyframes stageCgPop {
+  from { opacity: 0; transform: translate(-50%, -46%) scale(0.94); }
+  to { opacity: 1; transform: translate(-50%, -50%) scale(1); }
+}
+.no-effects .stage-cg { animation: none; }
+@media (prefers-reduced-motion: reduce) { .stage-cg { animation: none !important; } }
+.stage-cg img {
+  max-width: min(46vw, 680px);
+  max-height: 46vh;
+  object-fit: contain;
+  border-radius: 10px;
+  border: 2px solid var(--app-border);
+  box-shadow: 0 16px 44px rgba(0, 0, 0, 0.55);
+}
+.stage-cg-count {
+  position: absolute;
+  right: 8px;
+  bottom: 8px;
+  padding: 1px 8px;
+  border-radius: 9999px;
+  background: rgba(0, 0, 0, 0.65);
+  color: #fff;
+  font-size: 11px;
+}
+
+/* Stage emotion reactions — the Director's read animates the speaker. */
+.stage-em-anger { animation: emShake 0.4s ease-in-out 2; }
+.stage-em-anger img, .stage-em-anger .stage-portrait-fallback {
+  filter: drop-shadow(0 0 18px rgba(255, 60, 40, 0.45));
+}
+@keyframes emShake {
+  0%, 100% { transform: translateX(0); }
+  20% { transform: translateX(-7px) rotate(-0.6deg); }
+  45% { transform: translateX(6px) rotate(0.5deg); }
+  70% { transform: translateX(-4px); }
+}
+.stage-em-fear { animation: emTremble 0.14s linear 10; }
+@keyframes emTremble {
+  0%, 100% { transform: translate(0, 0); }
+  50% { transform: translate(1.5px, -1px); }
+}
+.stage-em-joy { animation: emBounce 0.55s cubic-bezier(0.3, 1.4, 0.5, 1) 2; }
+@keyframes emBounce {
+  0%, 100% { transform: translateY(0); }
+  40% { transform: translateY(-14px); }
+  70% { transform: translateY(-3px); }
+}
+.stage-em-sad { filter: saturate(0.7) brightness(0.85); transform: translateY(8px); }
+.stage-em-shock { animation: emPop 0.3s ease-out 1; }
+@keyframes emPop {
+  0% { transform: scale(1); }
+  45% { transform: scale(1.06); }
+  100% { transform: scale(1); }
+}
+.no-effects .stage-em-anger, .no-effects .stage-em-fear,
+.no-effects .stage-em-joy, .no-effects .stage-em-shock {
+  animation: none;
+}
+@media (prefers-reduced-motion: reduce) {
+  .stage-em-anger, .stage-em-fear, .stage-em-joy, .stage-em-shock {
+    animation: none !important;
+  }
+}
+
+/* --- Stage RPG HUD: the Director's read as game chrome ------------------ */
+/* Hidden on ordinary themes; the game themes wear it. */
+.stage-hud { display: none; }
+.theme-rpg .stage-hud, .theme-pixelrpg .stage-hud,
+.theme-pixelchat .stage-hud, .theme-snek .stage-hud, .theme-gameboy .stage-hud {
+  position: absolute;
+  top: 12px;
+  left: 14px;
+  z-index: 4;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 12px;
+  font-family: var(--font-mono, monospace);
+  font-size: 11px;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--app-text);
+  background: color-mix(in srgb, var(--app-bg) 78%, transparent);
+  border: 2px solid var(--app-border);
+  border-radius: 6px;
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.4);
+  max-width: min(70vw, 560px);
+}
+.stage-hud-scene { font-weight: 700; color: var(--app-accent); white-space: nowrap; }
+.stage-hud-loc {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  opacity: 0.85;
+}
+.stage-hud-mood { opacity: 0.6; white-space: nowrap; }
+.stage-hud-tension {
+  width: 90px;
+  height: 8px;
+  border: 1px solid var(--app-border);
+  border-radius: 2px;
+  overflow: hidden;
+  background: rgba(0, 0, 0, 0.35);
+  flex-shrink: 0;
+}
+.stage-hud-tension i {
+  display: block;
+  height: 100%;
+  background: linear-gradient(90deg,
+    color-mix(in srgb, var(--app-accent) 70%, #2faf5f),
+    var(--app-accent));
+  transition: width 0.8s ease;
+}
+.theme-pixelrpg .stage-hud {
+  border-radius: 4px;
+  border-color: #eef2ff;
+  outline: 2px solid #4a5aa8;
+  outline-offset: -4px;
+  background: linear-gradient(180deg, #2a3fb0, #101b6b);
+}
+.theme-snek .stage-hud { border-width: 1px; border-radius: 2px; letter-spacing: 0.25em; }
+
+/* --- Real pixels for the pixel themes ----------------------------------- */
+/* Press Start 2P (SIL OFL 1.1, see public/fonts/OFL-PressStart2P.txt),
+   bundled locally — no network fetch. Applied only while the reader is on
+   the stock font (.stock-font), so an explicit font choice still wins. */
+@font-face {
+  font-family: 'Press Start 2P';
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url('/fonts/press-start-2p-latin.woff2') format('woff2');
+}
+.stock-font.theme-pixelchat, .stock-font.theme-pixelrpg, .stock-font.theme-gameboy {
+  font-family: 'Press Start 2P', ui-monospace, monospace;
+  letter-spacing: 0;
+}
+/* An 8px-grid face reads best a notch smaller and with looser leading. */
+.theme-pixelchat .markdown-body, .theme-pixelrpg .markdown-body,
+.theme-pixelchat .stage-text, .theme-pixelrpg .stage-text,
+.theme-gameboy .markdown-body {
+  font-size: 0.82em;
+  line-height: 2;
+}
+.stock-font.theme-pixelchat *, .stock-font.theme-pixelrpg *, .stock-font.theme-gameboy * {
+  text-rendering: optimizeSpeed;
+  -webkit-font-smoothing: none;
+}
+
+/* --- Director emphasis in the Stage textbox ----------------------------- */
+/* The Director's whispers/shouts/beats reshape the words themselves. */
+.stage-emk-whisper {
+  font-size: 0.86em;
+  font-style: italic;
+  opacity: 0.72;
+  letter-spacing: 0.04em;
+}
+.stage-emk-shout {
+  font-weight: 800;
+  font-size: 1.08em;
+  letter-spacing: 0.04em;
+  color: var(--app-accent);
+  text-shadow: 0 0 12px color-mix(in srgb, var(--app-accent) 40%, transparent);
+}
+.stage-emk-beat {
+  display: inline-block;
+  animation: stageBeat 1.6s ease-in-out infinite;
+}
+@keyframes stageBeat {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.65; }
+}
+.no-effects .stage-emk-beat { animation: none; }
+@media (prefers-reduced-motion: reduce) { .stage-emk-beat { animation: none !important; } }
+
+/* --- VN backdrops: the scene's location dresses the whole stage ---------- */
+.stage-backdrop {
+  position: absolute;
+  inset: 0;
+  z-index: 0;
+  overflow: hidden;
+  animation: backdropIn 1.1s ease both;
+}
+.stage-backdrop img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+/* Legibility floor: darken toward the textbox and the HUD corner. */
+.stage-backdrop::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background:
+    linear-gradient(to bottom, rgba(0, 0, 0, 0.25), transparent 30%,
+      transparent 55%, rgba(0, 0, 0, 0.55));
+}
+@keyframes backdropIn {
+  from { opacity: 0; transform: scale(1.04); }
+  to { opacity: 1; transform: scale(1); }
+}
+.stage-portrait, .stage-bubble, .stage-cg { z-index: 2; }
+@media (prefers-reduced-motion: reduce) { .stage-backdrop { animation: none !important; } }
+
+/* --- Visual Novel mode --------------------------------------------------- */
+.vn { background: #05060c; }
+.vn-backdrop {
+  position: absolute;
+  inset: 0;
+  z-index: 0;
+  animation: backdropIn 1.2s ease both;
+}
+.vn-backdrop img { width: 100%; height: 100%; object-fit: cover; }
+/* Mood wash + legibility floor over the backdrop. */
+.vn-wash {
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+  pointer-events: none;
+  background:
+    linear-gradient(to bottom, rgba(0, 0, 0, 0.28), transparent 26%,
+      transparent 52%, rgba(0, 0, 0, 0.62) 92%);
+}
+.vn-wash::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background: var(--scene-tint, transparent);
+  opacity: calc(var(--scene-tint-a, 0) * 1.4);
+  transition: background 1.2s ease, opacity 1.2s ease;
+}
+
+/* The camera rig: everything on stage rides its slow push-in. */
+.vn-camera {
+  position: absolute;
+  inset: 0;
+  z-index: 2;
+  transform: scale(1);
+  transform-origin: 50% 68%;
+  transition: transform 7s cubic-bezier(0.2, 0.5, 0.3, 1);
+}
+.vn-camera.vn-speaking { transform: scale(1.06); }
+
+/* The focused sprite: bottom-anchored center, entering with a soft rise. */
+.vn-sprite {
+  position: absolute;
+  bottom: 0;
+  left: 50%;
+  transform: translateX(-50%);
+  height: 92%;
+  display: flex;
+  align-items: flex-end;
+  justify-content: center;
+  animation: vnSpriteIn 0.5s ease-out both;
+}
+.vn-sprite img {
+  max-height: 100%;
+  max-width: min(60vw, 720px);
+  object-fit: contain;
+  filter: drop-shadow(0 18px 34px rgba(0, 0, 0, 0.6));
+}
+.vn-sprite-user { transform: translateX(-50%) scaleX(-1); }
+.vn-sprite-user img { filter: drop-shadow(0 18px 34px rgba(0, 0, 0, 0.6)); }
+@keyframes vnSpriteIn {
+  from { opacity: 0; transform: translateX(-50%) translateY(14px); }
+  to { opacity: 1; transform: translateX(-50%) translateY(0); }
+}
+.vn-sprite-user { animation-name: vnSpriteInUser; }
+@keyframes vnSpriteInUser {
+  from { opacity: 0; transform: translateX(-50%) scaleX(-1) translateY(14px); }
+  to { opacity: 1; transform: translateX(-50%) scaleX(-1) translateY(0); }
+}
+
+/* CG floats upper-center, above the sprite. */
+.vn-cg {
+  position: absolute;
+  left: 50%;
+  top: 34%;
+  transform: translate(-50%, -50%);
+  z-index: 3;
+  cursor: zoom-in;
+  animation: stageCgPop 0.3s ease-out both;
+}
+.vn-cg img {
+  max-width: min(44vw, 640px);
+  max-height: 40vh;
+  object-fit: contain;
+  border-radius: 10px;
+  border: 2px solid rgba(255, 255, 255, 0.25);
+  box-shadow: 0 16px 44px rgba(0, 0, 0, 0.6);
+}
+
+/* Area title card. */
+.vn-area {
+  position: absolute;
+  top: 12%;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 5;
+  padding: 0.5rem 1.6rem;
+  font-variant: small-caps;
+  letter-spacing: 0.3em;
+  font-size: 1.05rem;
+  color: #fff;
+  background: rgba(0, 0, 0, 0.55);
+  border-top: 1px solid rgba(255, 255, 255, 0.35);
+  border-bottom: 1px solid rgba(255, 255, 255, 0.35);
+  animation: vnArea 2.6s ease both;
+  pointer-events: none;
+  white-space: nowrap;
+  max-width: 80vw;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+@keyframes vnArea {
+  0% { opacity: 0; transform: translateX(-50%) translateY(-8px); }
+  12%, 82% { opacity: 1; transform: translateX(-50%) translateY(0); }
+  100% { opacity: 0; transform: translateX(-50%) translateY(4px); }
+}
+
+/* Letterbox bars close in when the scene runs hot. */
+.vn-bar {
+  position: absolute;
+  left: 0;
+  right: 0;
+  height: 0;
+  background: #000;
+  z-index: 4;
+  transition: height 1.4s cubic-bezier(0.4, 0, 0.2, 1);
+  pointer-events: none;
+}
+.vn-bar-top { top: 0; }
+.vn-bar-bottom { bottom: 0; }
+.vn-bar-on { height: 7.5%; }
+
+/* The floating dialogue box. */
+.vn-boxwrap {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 6;
+  padding: 0 1rem 8.75rem;
+  display: flex;
+  justify-content: center;
+  pointer-events: none;
+}
+.vn-box {
+  pointer-events: auto;
+  position: relative;
+  width: 100%;
+  max-width: 860px;
+  min-height: 6.5rem;
+  border-radius: 14px;
+  border: 1px solid rgba(255, 255, 255, 0.22);
+  background: rgba(8, 10, 22, 0.82);
+  backdrop-filter: blur(6px);
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.5);
+  padding: 1.4rem 1.4rem 1rem;
+  color: #f2f4ff;
+  cursor: pointer;
+}
+.vn-name {
+  position: absolute;
+  top: -13px;
+  left: 18px;
+  padding: 2px 14px;
+  border-radius: 8px;
+  background: var(--app-accent);
+  color: var(--app-bg);
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.45);
+}
+.vn-text {
+  max-height: 26vh;
+  overflow-y: auto;
+  line-height: 1.7;
+}
+.vn-text p { margin: 0 0 0.6em; }
+.vn-text p:last-child { margin-bottom: 0; }
+.vn-text .book-say { color: var(--app-accent); }
+.vn-cursor {
+  position: absolute;
+  right: 14px;
+  bottom: 8px;
+  font-size: 11px;
+  color: var(--app-accent);
+  animation: rpgCursor 0.9s ease-in-out infinite;
+  pointer-events: none;
+}
+
+.no-effects .vn-camera { transition: none; transform: none !important; }
+.no-effects .vn-sprite, .no-effects .vn-backdrop, .no-effects .vn-area { animation: none; }
+@media (prefers-reduced-motion: reduce) {
+  .vn-camera { transition: none; transform: none !important; }
+  .vn-sprite, .vn-backdrop, .vn-area, .vn-cursor, .vn-cg { animation: none !important; }
+  .vn-bar { transition: none; }
+}
+
+/* --- Director FX canvas + VN beat box + RPG command turns --------------- */
+.scene-fx {
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+  pointer-events: none;
+  animation: sceneFxIn 1.4s ease both;
+}
+@keyframes sceneFxIn { from { opacity: 0; } to { opacity: 1; } }
+.no-effects .scene-fx { display: none; }
+@media (prefers-reduced-motion: reduce) { .scene-fx { display: none; } }
+
+/* VN beat box: the spoken line leads; narration around it stays quiet. */
+.vn-aside {
+  font-size: 0.82em;
+  font-style: italic;
+  opacity: 0.62;
+  margin-bottom: 0.45rem;
+  line-height: 1.5;
+}
+.vn-text.vn-narration { font-style: italic; opacity: 0.88; }
+.vn-text .stage-emk-shout { color: var(--app-accent); }
+
+/* Emotion reactions can land on the sprite IMG itself. */
+img.stage-em-anger { filter: drop-shadow(0 0 18px rgba(255, 60, 40, 0.45)); }
+
+/* RPG command window: the reader's own turn reads as a chosen action. */
+.theme-rpg .stage-box-cmd, .theme-pixelrpg .stage-box-cmd,
+.theme-pixelchat .stage-box-cmd, .theme-snek .stage-box-cmd,
+.theme-gameboy .stage-box-cmd {
+  border-color: var(--app-accent) !important;
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--app-accent) 45%, transparent),
+    0 10px 34px rgba(0, 0, 0, 0.45);
+}
+.theme-rpg .stage-box-cmd .stage-text p:first-child::before,
+.theme-pixelrpg .stage-box-cmd .stage-text p:first-child::before,
+.theme-pixelchat .stage-box-cmd .stage-text p:first-child::before,
+.theme-snek .stage-box-cmd .stage-text p:first-child::before,
+.theme-gameboy .stage-box-cmd .stage-text p:first-child::before {
+  content: '▶ ';
+  color: var(--app-accent);
+  animation: rpgCursor 0.9s ease-in-out infinite;
+  display: inline-block;
+}
+
+/* VN cast positions: solo center; duo left/right; the idle side dims back. */
+.vn-sprite-solo { left: 50%; }
+.vn-sprite-left { left: 35%; }
+.vn-sprite-right { left: 65%; }
+.vn-sprite { transition: filter 0.6s ease, opacity 0.6s ease; }
+.vn-dim { filter: brightness(0.45) saturate(0.6); opacity: 0.92; z-index: 1; }
+.vn-sprite:not(.vn-dim) { z-index: 2; }

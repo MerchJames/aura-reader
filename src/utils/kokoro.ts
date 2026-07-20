@@ -66,15 +66,45 @@ export const listKokoroVoices = async (base: string, apiKey: string): Promise<st
   return KNOWN_KOKORO_VOICES;
 };
 
-/** Pick the Kokoro voice for a given speaker. */
+/** Speaker names that are narration, not a distinct character to cast. */
+const NARRATION_NAMES = new Set(['', 'story', 'narrator', 'system', 'prompt', 'note']);
+
+/** Stable djb2 hash → deterministic voice pick per character name. */
+const hashName = (s: string): number => {
+  let h = 5381;
+  for (let i = 0; i < s.length; i++) h = ((h << 5) + h + s.charCodeAt(i)) | 0;
+  return h >>> 0;
+};
+
+/**
+ * Pick the Kokoro voice for a speaker. Precedence: the reader's own voice for
+ * user turns → an explicit per-character assignment → (auto-cast) a distinct,
+ * stable voice for a named side character → the default narrator voice. The
+ * protagonist (`primaryName`) and plain narration always keep the narrator
+ * voice, so auto-cast only differentiates the supporting cast.
+ */
 export const voiceForSpeaker = (cfg: {
   role: string;
   name?: string;
   kokoroVoice: string;
   kokoroUserVoice: string;
   ttsVoiceByCharacter: Record<string, string>;
+  primaryName?: string;
+  autoCast?: boolean;
 }): string => {
   if (cfg.role === 'user') return cfg.kokoroUserVoice || cfg.kokoroVoice;
-  if (cfg.name && cfg.ttsVoiceByCharacter[cfg.name]) return cfg.ttsVoiceByCharacter[cfg.name];
+  const name = cfg.name?.trim();
+  if (name && cfg.ttsVoiceByCharacter[name]) return cfg.ttsVoiceByCharacter[name];
+
+  if (cfg.autoCast && name) {
+    const lower = name.toLowerCase();
+    const isPrimary = !!cfg.primaryName && lower === cfg.primaryName.trim().toLowerCase();
+    if (!isPrimary && !NARRATION_NAMES.has(lower)) {
+      const pool = KNOWN_KOKORO_VOICES.filter(
+        v => v !== cfg.kokoroVoice && v !== cfg.kokoroUserVoice,
+      );
+      if (pool.length) return pool[hashName(lower) % pool.length];
+    }
+  }
   return cfg.kokoroVoice;
 };

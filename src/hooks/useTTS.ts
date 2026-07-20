@@ -75,6 +75,7 @@ export const useTTS = () => {
 
     const { processedText } = processText(content, {
       hideMetadata: s.hideMetadata,
+      repairFormatting: false,
       substituteNames: s.substituteNames,
       characterName: s.currentStory?.characterName,
       userName: s.currentStory?.userName,
@@ -116,6 +117,8 @@ export const useTTS = () => {
         kokoroVoice: s.kokoroVoice,
         kokoroUserVoice: s.kokoroUserVoice,
         ttsVoiceByCharacter: s.ttsVoiceByCharacter,
+        primaryName: s.currentStory?.characterName,
+        autoCast: s.autoCastVoices,
       });
       s.setTtsPending(true);
       s.setTtsProgress(0);

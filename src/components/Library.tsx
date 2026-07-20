@@ -124,6 +124,7 @@ export const Library = () => {
   const [dragging, setDragging] = useState(false);
   const [importing, setImporting] = useState(false);
   const [errors, setErrors] = useState<string[]>([]);
+  const [notes, setNotes] = useState<string[]>([]);
   const [pending, setPending] = useState<{ stories: File[]; cards: File[] } | null>(null);
 
   const runImport = async (stories: File[], cards: File[]) => {
@@ -131,6 +132,7 @@ export const Library = () => {
     try {
       const result = await importFiles(stories, cards);
       setErrors(result.errors);
+      setNotes(result.notes);
       setPending(null);
     } finally {
       setImporting(false);
@@ -210,6 +212,21 @@ export const Library = () => {
             </button>
             <p className="font-bold mb-1">Some files could not be imported:</p>
             {errors.map((err, i) => <p key={i} className="text-muted">{err}</p>)}
+          </div>
+        </div>
+      )}
+
+      {notes.length > 0 && (
+        <div className="max-w-5xl w-full mx-auto px-6 sm:px-10 mb-4">
+          <div className="rounded-xl border border-accent/40 bg-accent/10 p-4 text-sm relative">
+            <button
+              onClick={() => setNotes([])}
+              className="absolute top-2 right-2 p-1 opacity-60 hover:opacity-100"
+            >
+              <X size={14} />
+            </button>
+            <p className="font-bold mb-1">Branches attached:</p>
+            {notes.map((n, i) => <p key={i} className="text-muted">{n}</p>)}
           </div>
         </div>
       )}

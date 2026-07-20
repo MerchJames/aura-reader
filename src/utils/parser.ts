@@ -126,19 +126,48 @@ const koboldSwipes = (action: any, selected: string): string[] | undefined => {
   return all.length > 1 ? all : undefined;
 };
 
+/**
+ * KoboldAI / KoboldCpp instruct saves separate turns with literal
+ * `{{[INPUT]}}` (user) and `{{[OUTPUT]}}` (model) control tokens rather than a
+ * per-action structure. When those markers are present, split the text into
+ * role-tagged turns and drop the markers — they're control tokens, not story
+ * text, so they must never reach the reader. Returns null when no markers exist
+ * (the caller keeps its normal single-message behaviour).
+ */
+const INSTRUCT_MARKER = /\{\{\[(?:INPUT|OUTPUT)\]\}\}/i;
+const INSTRUCT_SPLIT = /\{\{\[(INPUT|OUTPUT)\]\}\}/gi;
+
+const splitKoboldInstruct = (
+  text: string,
+  storyName: string | undefined,
+): { role: 'user' | 'ai'; name: string; content: string }[] | null => {
+  if (!INSTRUCT_MARKER.test(text)) return null;
+  const aiName = storyName || 'Story';
+  const parts = text.split(INSTRUCT_SPLIT);
+  const turns: { role: 'user' | 'ai'; name: string; content: string }[] = [];
+
+  // Text before the first marker is leading narration / memory (model side).
+  const lead = parts[0]?.trim();
+  if (lead) turns.push({ role: 'ai', name: aiName, content: lead });
+
+  // Remaining entries alternate [tag, body, tag, body, ...].
+  for (let i = 1; i < parts.length; i += 2) {
+    const isInput = parts[i].toUpperCase() === 'INPUT';
+    const body = (parts[i + 1] ?? '').trim();
+    if (!body) continue;
+    turns.push(
+      isInput
+        ? { role: 'user', name: 'You', content: body }
+        : { role: 'ai', name: aiName, content: body },
+    );
+  }
+  return turns.length ? turns : null;
+};
+
 export const parseKoboldText = (text: string, fileName: string): ParsedStory => {
   const parsed = JSON.parse(text);
   const messages: Message[] = [];
   const storyName = typeof parsed.story_name === 'string' ? parsed.story_name : undefined;
-
-  if (typeof parsed.prompt === 'string' && parsed.prompt.trim()) {
-    messages.push({
-      id: nextId('kb'),
-      role: 'ai',
-      name: 'Prompt',
-      content: parsed.prompt,
-    });
-  }
 
   // `actions` is an array in classic saves, an object map in newer ones.
   let actions: any[] = [];
@@ -155,10 +184,41 @@ export const parseKoboldText = (text: string, fileName: string): ParsedStory => 
     }
   }
 
+  const promptText = typeof parsed.prompt === 'string' ? parsed.prompt : '';
+
+  // Instruct saves separate turns with {{[INPUT]}}/{{[OUTPUT]}} markers that can
+  // straddle field boundaries — a marker at the end of `prompt` with its body in
+  // the first action, or a turn spanning two actions. Join the whole stream and
+  // split it once so those turns are reassembled correctly. A marker anywhere in
+  // the stream signals instruct format; per-action swipes don't apply to it.
+  const stream = [promptText, ...actions.map(koboldActionText)]
+    .map(t => t.trim())
+    .filter(Boolean)
+    .join('\n');
+  const instructTurns = splitKoboldInstruct(stream, storyName);
+  if (instructTurns) {
+    instructTurns.forEach(t => messages.push({ id: nextId('kb'), ...t }));
+    return {
+      title: storyName || stripExtension(fileName),
+      format: 'kobold',
+      messages,
+    };
+  }
+
+  // --- Non-instruct saves: continuous prose, one page per action. ---
+  if (promptText.trim()) {
+    messages.push({
+      id: nextId('kb'),
+      role: 'ai',
+      name: 'Prompt',
+      content: promptText,
+    });
+  }
+
   actions.forEach(action => {
     const content = koboldActionText(action);
     if (!content.trim()) return;
-    // Kobold stories are continuous prose, not chat turns — keep it all narration.
+    // Preserve alternate generations (Options) as swipes.
     messages.push({
       id: nextId('kb'),
       role: 'ai',

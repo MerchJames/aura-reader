@@ -16,11 +16,17 @@ export const AMBIENT_SOUNDS: { id: AmbientSound; label: string }[] = [
  * silences. Browsers block audio until a user gesture, so `resume` is
  * wired to the first interaction.
  */
+/** Bed crossfade duration (seconds) when the scene changes the soundscape. */
+const FADE = 0.6;
+
 export class AmbientController {
   private ctx: AudioContext | null = null;
   private master: GainNode | null = null;
+  /** Envelope gain for crossfading between beds — independent of user/tension volume on master. */
+  private fade: GainNode | null = null;
   private active: AudioScheduledSourceNode[] = [];
   private timers: number[] = [];
+  private swapTimer: number | null = null;
   private audioEl: HTMLAudioElement | null = null;
   private current = '';
   private volume = 0.35;
@@ -32,6 +38,9 @@ export class AmbientController {
       this.master = this.ctx.createGain();
       this.master.gain.value = this.volume;
       this.master.connect(this.ctx.destination);
+      this.fade = this.ctx.createGain();
+      this.fade.gain.value = 1;
+      this.fade.connect(this.master);
     }
     if (this.ctx.state === 'suspended') void this.ctx.resume();
     return this.ctx;
@@ -41,6 +50,43 @@ export class AmbientController {
     this.volume = v;
     if (this.ctx && this.master) this.master.gain.setTargetAtTime(v, this.ctx.currentTime, 0.2);
     if (this.audioEl) this.audioEl.volume = v;
+  }
+
+  /**
+   * A one-shot "sting" for a dramatic beat — a soft low thump under a quick
+   * bell, synthesized on the spot. Transient nodes stop themselves; routed
+   * through master so the user's volume applies. No-op until audio is armed.
+   */
+  sting() {
+    const ctx = this.ensureCtx();
+    if (ctx.state !== 'running' || !this.master) return;
+    const t = ctx.currentTime;
+    const out = this.master;
+
+    // Low thump — a short pitch-dropping sine.
+    const thump = ctx.createOscillator();
+    thump.type = 'sine';
+    thump.frequency.setValueAtTime(150, t);
+    thump.frequency.exponentialRampToValueAtTime(58, t + 0.25);
+    const tg = ctx.createGain();
+    tg.gain.setValueAtTime(0.0001, t);
+    tg.gain.exponentialRampToValueAtTime(0.5, t + 0.012);
+    tg.gain.exponentialRampToValueAtTime(0.0001, t + 0.45);
+    thump.connect(tg).connect(out);
+    thump.start(t); thump.stop(t + 0.5);
+
+    // Bell shimmer — two detuned sines with a longer decay.
+    [784, 1176].forEach((f, i) => {
+      const o = ctx.createOscillator();
+      o.type = 'sine';
+      o.frequency.value = f;
+      const g = ctx.createGain();
+      g.gain.setValueAtTime(0.0001, t);
+      g.gain.exponentialRampToValueAtTime(i === 0 ? 0.22 : 0.1, t + 0.01);
+      g.gain.exponentialRampToValueAtTime(0.0001, t + 1.1);
+      o.connect(g).connect(out);
+      o.start(t); o.stop(t + 1.2);
+    });
   }
 
   /** Re-arm audio after a user gesture (autoplay policy). */
@@ -54,25 +100,54 @@ export class AmbientController {
       if (spec) this.resume();
       return;
     }
-    this.stop();
+    const prev = this.current;
     this.current = spec;
-    if (!spec) return;
-    if (spec.startsWith('builtin:')) this.playBuiltin(spec.slice(8) as AmbientSound);
-    else this.playUrl(spec);
+    if (this.swapTimer) { clearTimeout(this.swapTimer); this.swapTimer = null; }
+
+    const startNew = () => {
+      this.stopSources();
+      if (!spec) return;
+      if (spec.startsWith('builtin:')) this.playBuiltin(spec.slice(8) as AmbientSound);
+      else this.playUrl(spec);
+      // Fade the new synthesized bed up (URL beds start at their own volume).
+      if (this.ctx && this.fade) {
+        const t = this.ctx.currentTime;
+        this.fade.gain.cancelScheduledValues(t);
+        this.fade.gain.setValueAtTime(0.0001, t);
+        this.fade.gain.linearRampToValueAtTime(1, t + FADE);
+      }
+    };
+
+    // Crossfade out of a synthesized bed before swapping; hard-swap otherwise.
+    if (prev.startsWith('builtin:') && this.ctx && this.fade) {
+      const t = this.ctx.currentTime;
+      this.fade.gain.cancelScheduledValues(t);
+      this.fade.gain.setValueAtTime(this.fade.gain.value, t);
+      this.fade.gain.linearRampToValueAtTime(0.0001, t + FADE);
+      this.swapTimer = window.setTimeout(() => { this.swapTimer = null; startNew(); }, FADE * 1000 + 20);
+    } else {
+      startNew();
+    }
   }
 
-  stop() {
+  /** Tear down the current sources without touching the graph or intended spec. */
+  private stopSources() {
     this.timers.forEach(t => clearInterval(t));
     this.timers = [];
     this.active.forEach(n => { try { n.stop(); } catch { /* already stopped */ } });
     this.active = [];
     if (this.audioEl) { this.audioEl.pause(); this.audioEl.src = ''; this.audioEl = null; }
+  }
+
+  stop() {
+    if (this.swapTimer) { clearTimeout(this.swapTimer); this.swapTimer = null; }
+    this.stopSources();
     this.current = '';
   }
 
   dispose() {
     this.stop();
-    if (this.ctx) { void this.ctx.close(); this.ctx = null; this.master = null; }
+    if (this.ctx) { void this.ctx.close(); this.ctx = null; this.master = null; this.fade = null; }
   }
 
   private playUrl(url: string) {
@@ -109,7 +184,7 @@ export class AmbientController {
 
   private playBuiltin(kind: AmbientSound) {
     const ctx = this.ensureCtx();
-    const out = this.master!;
+    const out = this.fade!;
     if (kind === 'rain') {
       const src = this.noiseSource(ctx);
       const hp = ctx.createBiquadFilter(); hp.type = 'highpass'; hp.frequency.value = 800;
@@ -151,7 +226,7 @@ export class AmbientController {
       src.start(); this.active.push(src);
       // Random crackle pops layered over the bed.
       const pop = () => {
-        if (!this.ctx || !this.master) return;
+        if (!this.ctx || !this.fade) return;
         const t = this.ctx.currentTime;
         const n = this.noiseSource(this.ctx);
         const bp = this.ctx.createBiquadFilter();
@@ -160,7 +235,7 @@ export class AmbientController {
         pg.gain.setValueAtTime(0.0001, t);
         pg.gain.exponentialRampToValueAtTime(0.25 + Math.random() * 0.3, t + 0.005);
         pg.gain.exponentialRampToValueAtTime(0.0001, t + 0.08 + Math.random() * 0.1);
-        n.connect(bp).connect(pg).connect(this.master);
+        n.connect(bp).connect(pg).connect(this.fade);
         n.start(t); n.stop(t + 0.3);
       };
       const id = window.setInterval(() => {

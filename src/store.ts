@@ -1,10 +1,13 @@
 import { create } from 'zustand';
 import { persist } from 'zustand/middleware';
 import {
-  AppConfig, AppState, Chain, ChainStarSettings, Message, Story, StoryFormat,
+  AppConfig, AppState, Chain, ChainStarSettings, Message, Story, StoryFormat, StoryTimeline,
 } from './types';
 import { ParsedCard, parseCompanionCard, parseFile } from './utils/parser';
 import { deleteStory, getAllStoryMetas, getStory, putStory } from './lib/storage';
+import {
+  MIN_SHARED_PREFIX, groupBranchFamilies, timelineMessages, toTimeline,
+} from './utils/branchMerge';
 
 /* ------------------------------------------------------------------ */
 /* Helpers                                                             */
@@ -101,16 +104,16 @@ const newId = () =>
 const CONFIG_KEYS: (keyof AppConfig)[] = [
   'theme', 'accentColor', 'fontFamily', 'fontSize', 'textColor', 'bgColor', 'animationStyle', 'streamEffect',
   'expressiveText', 'cinematicPacing', 'expressiveIntensity', 'dropCaps', 'sceneTheming',
-  'sceneSoundscapes', 'emotionalTts',
+  'sceneSoundscapes', 'emotionalTts', 'sceneEmphasis', 'aiRepairFormatting',
   'hideMetadata', 'showImages', 'autofocusAutoZoom',
   'playbackSpeed', 'autoStream', 'autoFormat', 'autoFormatRules', 'statRules',
   'paragraphSpacing', 'dialogueOwnLine', 'smartTypography',
   'styleQuotes', 'substituteNames', 'dialogueColor', 'dialogueStyle', 'dialogueAnimation',
-  'contentWidth', 'oocHandling', 'phoneDialogueOnly', 'themeEffects',
+  'contentWidth', 'oocHandling', 'phoneDialogueOnly', 'themeEffects', 'livingBackground',
   'revealMode', 'messagePause', 'pauseAtPageEnd', 'ttsEnabled', 'ttsVoiceURI', 'ttsRate',
   'ttsPitch', 'ttsFollowSpeed', 'aiBaseUrl', 'aiApiKey', 'aiModel', 'aiAdvanced',
   'ttsEngine', 'kokoroBaseUrl', 'kokoroApiKey', 'kokoroVoice', 'kokoroUserVoice', 'ttsVoiceByCharacter',
-  'ambientEnabled', 'ambientVolume', 'ambientByTheme',
+  'autoCastVoices', 'ambientEnabled', 'ambientVolume', 'ambientByTheme',
 ];
 
 const pickConfig = (state: AppState): AppConfig => {
@@ -132,7 +135,11 @@ export const useAppStore = create<AppState>()(
       const buildStorySnapshot = (): Story | null => {
         const { currentStory, chains, currentChainIndex, currentMessageIndex } = get();
         if (!currentStory) return null;
-        const messages = chains.flatMap(c => c.messages);
+        // While a timeline (attached branch) is being read, the chains show
+        // the overlay — NEVER write that back over the trunk's messages.
+        const messages = currentStory.activeTimeline
+          ? currentStory.messages
+          : chains.flatMap(c => c.messages);
         let readCount = 0;
         for (let c = 0; c < currentChainIndex; c++) readCount += chains[c]?.messages.length ?? 0;
         readCount += currentMessageIndex + (get().streamingMessage ? 0 : 1);
@@ -176,7 +183,7 @@ export const useAppStore = create<AppState>()(
         /* ----- config defaults ----- */
         theme: 'dark',
         accentColor: '',
-        fontFamily: 'sans',
+        fontFamily: 'theme',
         fontSize: 16,
         textColor: '#ffffff',
         bgColor: '#111827',
@@ -189,6 +196,8 @@ export const useAppStore = create<AppState>()(
         sceneTheming: true,
         sceneSoundscapes: true,
         emotionalTts: true,
+        sceneEmphasis: false,
+        aiRepairFormatting: true,
         hideMetadata: true,
         showImages: true,
         autofocusAutoZoom: true,
@@ -216,6 +225,7 @@ export const useAppStore = create<AppState>()(
         kokoroVoice: 'af_bella',
         kokoroUserVoice: 'am_michael',
         ttsVoiceByCharacter: {},
+        autoCastVoices: true,
         ambientEnabled: false,
         ambientVolume: 0.35,
         ambientByTheme: {},
@@ -226,6 +236,7 @@ export const useAppStore = create<AppState>()(
         oocHandling: 'show',
         phoneDialogueOnly: false,
         themeEffects: true,
+        livingBackground: false,
         aiBaseUrl: '',
         aiApiKey: '',
         aiModel: '',
@@ -317,6 +328,9 @@ export const useAppStore = create<AppState>()(
                norm(story.title).includes(norm(c.name))));
           };
 
+          // Parse everything first — branch grouping needs the whole batch.
+          const notes: string[] = [];
+          const parsedFiles: { file: File; parsed: Awaited<ReturnType<typeof parseFile>> }[] = [];
           for (const file of files) {
             try {
               const parsed = await parseFile(file);
@@ -324,39 +338,190 @@ export const useAppStore = create<AppState>()(
                 errors.push(`${file.name}: no messages found`);
                 continue;
               }
-              const companion = matchCompanion(parsed);
-              const story: Story = {
-                id: newId(),
-                title: parsed.title,
-                format: parsed.format,
-                characterName: parsed.characterName ?? companion?.info.name,
-                userName: parsed.userName,
-                avatar: parsed.avatar ?? companion?.avatar,
-                characterAvatar: companion?.avatar,
-                messages: parsed.messages,
-                messageCount: parsed.messages.length,
-                importedAt: Date.now(),
-                progress: null,
-                highlights: [],
-                stars: {},
-                card: parsed.card ?? companion?.info,
-                tags: (parsed.card ?? companion?.info)?.tags,
-              };
-              await putStory(story);
-              imported.push(story);
+              parsedFiles.push({ file, parsed });
             } catch (e: any) {
               errors.push(`${file.name}: ${e?.message ?? 'failed to parse'}`);
             }
           }
 
+          const makeStory = (
+            parsed: (typeof parsedFiles)[number]['parsed'],
+            messages: Message[],
+            timelines?: StoryTimeline[],
+          ): Story => {
+            const companion = matchCompanion(parsed);
+            return {
+              id: newId(),
+              title: parsed.title,
+              format: parsed.format,
+              characterName: parsed.characterName ?? companion?.info.name,
+              userName: parsed.userName,
+              avatar: parsed.avatar ?? companion?.avatar,
+              characterAvatar: companion?.avatar,
+              messages,
+              messageCount: messages.length,
+              importedAt: Date.now(),
+              progress: null,
+              highlights: [],
+              stars: {},
+              card: parsed.card ?? companion?.info,
+              tags: (parsed.card ?? companion?.info)?.tags,
+              timelines: timelines?.length ? timelines : undefined,
+            };
+          };
+
+          // SillyTavern keeps each branch as its own chat file. Files in this
+          // batch that share history become ONE story with attached timelines;
+          // a lone file whose history matches a library story attaches to it.
+          const stEntries = parsedFiles.filter(p => p.parsed.format === 'sillytavern');
+          const otherEntries = parsedFiles.filter(p => p.parsed.format !== 'sillytavern');
+
+          const tryAttachToLibrary = async (
+            entry: (typeof parsedFiles)[number],
+          ): Promise<boolean> => {
+            const cand = { name: entry.file.name, messages: entry.parsed.messages };
+            const metas = get().library.filter(m =>
+              m.format === 'sillytavern' &&
+              m.messageCount >= MIN_SHARED_PREFIX &&
+              (!m.characterName || !entry.parsed.characterName ||
+                m.characterName === entry.parsed.characterName)).slice(0, 12);
+            for (const meta of metas) {
+              const existing = await getStory(meta.id);
+              if (!existing) continue;
+              const res = toTimeline(existing.messages, cand);
+              if (res === 'absorbed') {
+                notes.push(`${entry.file.name} is already part of “${existing.title}” — skipped`);
+                return true;
+              }
+              if (res) {
+                const updated: Story = {
+                  ...existing,
+                  timelines: [...(existing.timelines ?? []), res],
+                };
+                await putStory(updated);
+                if (get().currentStory?.id === updated.id) set({ currentStory: updated });
+                notes.push(`${entry.file.name} attached as a branch of “${existing.title}”`);
+                return true;
+              }
+            }
+            return false;
+          };
+
+          try {
+            const families = groupBranchFamilies(
+              stEntries.map(p => ({ name: p.file.name, messages: p.parsed.messages })),
+            );
+            for (const fam of families) {
+              const entry = stEntries[fam.trunkIndex];
+              const isLone = fam.timelines.length === 0 && fam.absorbed.length === 0;
+              if (isLone && (await tryAttachToLibrary(entry))) continue;
+              const story = makeStory(entry.parsed, entry.parsed.messages, fam.timelines);
+              await putStory(story);
+              imported.push(story);
+              if (fam.timelines.length > 0) {
+                notes.push(`“${story.title}”: attached ${fam.timelines.length} branch${
+                  fam.timelines.length === 1 ? '' : 'es'} from this batch`);
+              }
+              for (const name of fam.absorbed) {
+                notes.push(`${name} is an earlier checkpoint of “${story.title}” — skipped`);
+              }
+            }
+            for (const entry of otherEntries) {
+              const story = makeStory(entry.parsed, entry.parsed.messages);
+              await putStory(story);
+              imported.push(story);
+            }
+          } catch (e: any) {
+            errors.push(e?.message ?? 'import failed');
+          }
+
           if (imported.length > 0) {
-            const metas = imported.map(({ messages: _m, highlights: _h, stars: _s, card: _c, ...meta }) => meta);
+            const metas = imported.map(
+              ({ messages: _m, highlights: _h, stars: _s, card: _c, timelines: _t, ...meta }) => meta);
             set({ library: [...metas, ...get().library] });
           }
           if (imported.length === 1 && files.length === 1) {
             await get().openStory(imported[0].id);
           }
-          return { imported: imported.length, errors };
+          return { imported: imported.length, errors, notes };
+        },
+
+        setActiveTimeline: (timelineId) => {
+          const cs = get().currentStory;
+          if (!cs || (cs.activeTimeline ?? null) === timelineId) return;
+          // Landing point: the fork where the chosen path diverges (or where
+          // the one being left diverged, when returning to the trunk).
+          const landmark = cs.timelines?.find(
+            t => t.id === (timelineId ?? cs.activeTimeline));
+          const story: Story = { ...cs, activeTimeline: timelineId };
+          const msgs = timelineMessages(story);
+          const chains = buildChains(msgs, story.format, story.stars);
+          const target = Math.min(landmark?.forkIndex ?? 0, Math.max(0, msgs.length - 1));
+          let ci = 0, mi = 0, seen = 0;
+          outer: for (let c = 0; c < chains.length; c++) {
+            for (let m = 0; m < chains[c].messages.length; m++) {
+              if (seen === target) { ci = c; mi = m; break outer; }
+              seen++;
+            }
+          }
+          const vm = get().viewMode;
+          set({
+            currentStory: story,
+            chains,
+            currentChainIndex: ci,
+            currentMessageIndex: mi,
+            visibleMessages: visibleThrough(chains, ci, mi, get().layoutMode),
+            streamingMessage: null,
+            streamedText: '',
+            isStreaming: false,
+            // "Read this timeline" means READ — leave list views for the text.
+            viewMode: ['storybook', 'chat', 'book', 'stage', 'vn'].includes(vm) ? vm : 'chat',
+          });
+          schedulePersist();
+        },
+
+        removeTimeline: (timelineId) => {
+          const cs = get().currentStory;
+          if (!cs) return;
+          if ((cs.activeTimeline ?? null) === timelineId) get().setActiveTimeline(null);
+          const now = get().currentStory!;
+          const story: Story = {
+            ...now,
+            timelines: (now.timelines ?? []).filter(t => t.id !== timelineId),
+          };
+          set({ currentStory: story });
+          void putStory(story).catch(e => console.error('Failed to save story', e));
+        },
+
+        snipTimelineToStory: async (timelineId) => {
+          const cs = get().currentStory;
+          const tl = cs?.timelines?.find(t => t.id === timelineId);
+          if (!cs || !tl) return;
+          // A COPY — the tree it came from is untouched.
+          const messages = [...cs.messages.slice(0, tl.forkIndex), ...tl.messages]
+            .map(m => ({ ...m }));
+          const story: Story = {
+            id: newId(),
+            title: `${cs.title} · ${tl.name}`,
+            format: cs.format,
+            characterName: cs.characterName,
+            userName: cs.userName,
+            avatar: cs.avatar,
+            characterAvatar: cs.characterAvatar,
+            userAvatar: cs.userAvatar,
+            characterAvatars: cs.characterAvatars,
+            messages,
+            messageCount: messages.length,
+            importedAt: Date.now(),
+            progress: null,
+            highlights: [],
+            stars: {},
+            card: cs.card,
+            tags: cs.tags,
+          };
+          await putStory(story);
+          const { messages: _m, highlights: _h, stars: _s, card: _c, ...meta } = story;
+          set({ library: [meta, ...get().library] });
         },
 
         openStory: async (id: string) => {
@@ -364,9 +529,11 @@ export const useAppStore = create<AppState>()(
           if (!story) return;
 
           const { autoStream, layoutMode, viewMode } = get();
-          const chains = buildChains(story.messages, story.format, story.stars);
+          // Read through the story's active timeline (attached branch), if any.
+          const chains = buildChains(timelineMessages(story), story.format, story.stars);
           const proseFormat = story.format === 'kobold' || story.format === 'document';
-          const readingView = viewMode === 'storybook' || viewMode === 'chat'
+          const READING_VIEWS = ['storybook', 'chat', 'book', 'stage', 'vn'] as const;
+          const readingView = (READING_VIEWS as readonly string[]).includes(viewMode)
             ? viewMode
             : (proseFormat ? 'storybook' : 'chat');
 
@@ -744,6 +911,8 @@ export const useAppStore = create<AppState>()(
         setSceneTheming: (sceneTheming) => set({ sceneTheming }),
         setSceneSoundscapes: (sceneSoundscapes) => set({ sceneSoundscapes }),
         setEmotionalTts: (emotionalTts) => set({ emotionalTts }),
+        setSceneEmphasis: (sceneEmphasis) => set({ sceneEmphasis }),
+        setAiRepairFormatting: (aiRepairFormatting) => set({ aiRepairFormatting }),
         setHideMetadata: (hideMetadata) => set({ hideMetadata }),
         setAutoStream: (autoStream) => set({ autoStream }),
         setAutoFormat: (autoFormat) => set({ autoFormat }),
@@ -773,6 +942,7 @@ export const useAppStore = create<AppState>()(
           else delete next[name];
           set({ ttsVoiceByCharacter: next });
         },
+        setAutoCastVoices: (autoCastVoices) => set({ autoCastVoices }),
         setAmbientEnabled: (ambientEnabled) => set({ ambientEnabled }),
         setAmbientVolume: (ambientVolume) => set({ ambientVolume }),
         setThemeAmbient: (theme, value) => {
@@ -804,6 +974,7 @@ export const useAppStore = create<AppState>()(
         setOocHandling: (oocHandling) => set({ oocHandling }),
         setPhoneDialogueOnly: (phoneDialogueOnly) => set({ phoneDialogueOnly }),
         setThemeEffects: (themeEffects) => set({ themeEffects }),
+        setLivingBackground: (livingBackground) => set({ livingBackground }),
 
         setStoryAvatar: (who, dataUrl) => {
           const { currentStory } = get();
@@ -947,10 +1118,21 @@ export const useAppStore = create<AppState>()(
     },
     {
       name: 'aura-reader-settings',
+      version: 1,
+      // v0 → v1: 'sans' used to double as "follow the theme's font"; that
+      // meaning moved to the explicit 'theme' value, so old defaults keep
+      // their themed fonts.
+      migrate: (persisted: unknown, version: number) => {
+        const state = persisted as Record<string, unknown> | undefined;
+        if (state && version < 1 && state.fontFamily === 'sans') {
+          state.fontFamily = 'theme';
+        }
+        return state as never;
+      },
       partialize: (state) => ({
         ...pickConfig(state),
         savedConfigs: state.savedConfigs,
-        viewMode: state.viewMode === 'storybook' || state.viewMode === 'chat'
+        viewMode: ['storybook', 'chat', 'book', 'stage', 'vn'].includes(state.viewMode)
           ? state.viewMode
           : 'chat',
         layoutMode: state.layoutMode,

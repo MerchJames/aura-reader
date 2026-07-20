@@ -28,6 +28,7 @@ export const MOODS: readonly Mood[] = [
 
 const TIMES = ['dawn', 'day', 'dusk', 'night', 'unknown'] as const;
 const EMPHASIS_KINDS = ['whisper', 'shout', 'beat'] as const;
+const FX_KINDS = ['smoke', 'fog', 'stars', 'sparkles', 'rain', 'embers', 'snow', 'petals'] as const;
 
 /** Passages per enrichment request. Small enough to keep locality + valid JSON. */
 export const SCENE_BATCH_SIZE = 10;
@@ -59,11 +60,15 @@ export const SCENE_SYSTEM_PROMPT = [
   '  "location": short phrase or null,',
   '  "timeOfDay": one of dawn|day|dusk|night|unknown,',
   '  "speaker": { "name": string, "emotion": short word } or null,',
-  '  "emphasis": [ { "text": <verbatim substring of the passage>, "kind": whisper|shout|beat } ]',
+  '  "emphasis": [ { "text": <verbatim substring of the passage>, "kind": whisper|shout|beat } ],',
+  `  "fx": one of ${FX_KINDS.join('|')} or null`,
   '}]',
   '',
   'Rules: emphasis.text MUST be an exact substring copied from the passage.',
-  'Keep emphasis to at most 3 spans per passage. Output nothing but the JSON array.',
+  'Keep emphasis to at most 3 spans per passage. Set fx ONLY when the prose',
+  'clearly shows that weather or particle effect on screen (mist rolling in,',
+  'snowfall, sparks, floating ash, cherry blossoms…) — otherwise null.',
+  'Output nothing but the JSON array.',
 ].join('\n');
 
 /** Build the [system, user] messages that read a batch of passages. */
@@ -169,6 +174,9 @@ export const parseDescriptors = (
       timeOfDay: asTime(rec.timeOfDay),
       speaker,
       emphasis: cleanEmphasis(rec.emphasis, passage.content),
+      fx: typeof rec.fx === 'string' && (FX_KINDS as readonly string[]).includes(rec.fx)
+        ? (rec.fx as SceneDescriptor['fx'])
+        : undefined,
       createdAt: now,
     });
   });

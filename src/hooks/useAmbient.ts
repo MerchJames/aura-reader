@@ -3,12 +3,15 @@ import { useAppStore } from '../store';
 import { useAuraV2Store } from '../stores/useAuraV2Store';
 import { AmbientController } from '../utils/ambient';
 import { sceneAmbientSpec, tensionVolume } from '../utils/sceneMood';
+import { useScenes } from './useScenes';
+import { tensionAt } from '../utils/sceneSegment';
 
 /**
  * Loops an ambient bed while the reader is open. By default the bed is per
- * theme; when the Scene Director's soundscapes are on and it has read the
- * passage in focus, the bed follows that scene's mood/location instead and the
- * volume tracks its tension. Un-read passages fall back to the theme bed.
+ * theme; when scene soundscapes are on, the bed follows the SCENE the reader is
+ * in (its mood/location) so it holds across the span instead of flickering per
+ * message, and the volume tracks tension along the scene's arc. A neutral or
+ * bedless scene falls back to the theme bed. Works with no AI (heuristic scenes).
  */
 export const useAmbient = () => {
   const enabled = useAppStore(s => s.ambientEnabled);
@@ -17,16 +20,21 @@ export const useAmbient = () => {
   const screen = useAppStore(s => s.screen);
   const soundscapes = useAppStore(s => s.sceneSoundscapes);
   const storyId = useAppStore(s => s.currentStory?.id);
-  const activeId = useAppStore(s =>
-    s.streamingMessage?.id ?? s.visibleMessages[s.visibleMessages.length - 1]?.id);
-  const descriptor = useAuraV2Store(s =>
-    (soundscapes && storyId && activeId ? s.sceneByStory[storyId]?.[activeId] : undefined));
+  const { active: scene, activeId } = useScenes();
 
-  // A read scene drives the bed (mood/location) + volume (tension); otherwise
-  // the theme bed at the plain volume.
-  const useScene = soundscapes && !!descriptor;
-  const spec = useScene ? sceneAmbientSpec(descriptor!.mood, descriptor!.location) : themeSpec;
-  const effVolume = useScene ? tensionVolume(volume, descriptor!.tension) : volume;
+  // A dramatic beat the Director marked in the message now streaming — fire a
+  // one-shot sting as it opens (once per message).
+  const streamingId = useAppStore(s => s.streamingMessage?.id);
+  const hasBeat = useAuraV2Store(s => {
+    const d = storyId && streamingId ? s.sceneByStory[storyId]?.[streamingId] : undefined;
+    return !!d?.emphasis?.some(e => e.kind === 'beat');
+  });
+
+  // A scene with a bed drives the sound (mood/location) + volume (tension arc);
+  // otherwise the per-theme bed at the plain volume.
+  const sceneSpec = soundscapes && scene ? sceneAmbientSpec(scene.mood, scene.location) : '';
+  const spec = sceneSpec || themeSpec;
+  const effVolume = sceneSpec ? tensionVolume(volume, tensionAt(scene!, activeId)) : volume;
 
   const ctlRef = useRef<AmbientController | null>(null);
   if (!ctlRef.current) ctlRef.current = new AmbientController();
@@ -49,6 +57,12 @@ export const useAmbient = () => {
   }, [enabled, screen, spec]);
 
   useEffect(() => { ctlRef.current?.setVolume(effVolume); }, [effVolume]);
+
+  useEffect(() => {
+    if (enabled && soundscapes && screen === 'reader' && streamingId && hasBeat) {
+      ctlRef.current?.sting();
+    }
+  }, [enabled, soundscapes, screen, streamingId, hasBeat]);
 
   useEffect(() => () => ctlRef.current?.dispose(), []);
 };

@@ -2,6 +2,7 @@ import { useEffect } from 'react';
 import { useAppStore } from '../store';
 import { useAuraV2Store } from '../stores/useAuraV2Store';
 import { enrichCurrentPage, stopEnrich } from '../utils/sceneDirectorRunner';
+import { repairCurrentPage, stopRepairs } from '../utils/formatRepair';
 
 /**
  * The hybrid half of the Scene Director: while it's enabled for the open story
@@ -17,13 +18,18 @@ export const useSceneDirector = (): void => {
 
   useEffect(() => {
     if (!storyId || !enabled || !aiReady) return;
-    const t = setTimeout(() => { void enrichCurrentPage(storyId); }, 600);
+    const t = setTimeout(() => {
+      void enrichCurrentPage(storyId);
+      // The reread also proofreads: passages with broken quote/emphasis
+      // markup get an AI fix as a Lens override (gated by aiRepairFormatting).
+      void repairCurrentPage(storyId);
+    }, 600);
     return () => clearTimeout(t);
   }, [storyId, chainIndex, enabled, aiReady]);
 
-  // Stop an in-flight run when the story closes or the Director is turned off.
+  // Stop in-flight runs when the story closes or the Director is turned off.
   useEffect(() => {
-    if (!storyId || !enabled) stopEnrich();
-    return () => stopEnrich();
+    if (!storyId || !enabled) { stopEnrich(); stopRepairs(); }
+    return () => { stopEnrich(); stopRepairs(); };
   }, [storyId, enabled]);
 };

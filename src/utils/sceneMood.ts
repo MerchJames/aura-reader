@@ -4,7 +4,9 @@
  * No assets: soundscapes reuse the synthesized builtin beds.
  */
 
-import { AmbientSound, Mood } from '../types';
+import { AmbientSound, Mood, SceneDescriptor } from '../types';
+
+type TimeOfDay = NonNullable<SceneDescriptor['timeOfDay']>;
 
 const clamp = (n: number, lo: number, hi: number) => Math.max(lo, Math.min(hi, n));
 
@@ -51,6 +53,72 @@ export const sceneAmbientSpec = (mood: Mood, location?: string): string => {
 /** Scale the user's base volume by tension (0.7×…1.3×). */
 export const tensionVolume = (base: number, tension: number): number =>
   clamp(base * (0.7 + clamp(tension, 0, 1) * 0.6), 0, 1);
+
+/* ---------------------------------------------------------------- */
+/* 5d — visual atmosphere (assetless overlays)                       */
+/* ---------------------------------------------------------------- */
+
+/**
+ * Everything the reading surface needs to dress a scene, computed from its
+ * mood / tension / time of day. Pure numbers + flags — the component just maps
+ * them to CSS. All effects are subtle and sit BEHIND the text (readability is
+ * never traded for atmosphere) and vanish under the `no-effects` toggle.
+ */
+export interface Atmosphere {
+  mood: Mood;
+  /** Mood colour wash strength (0 = none, e.g. neutral). */
+  washOpacity: number;
+  /** Edge darkening — the room "closes in" on tense/ominous scenes (alpha 0..~0.6). */
+  vignette: number;
+  /** Time-of-day sky tint colour ('' = none). */
+  lightColor: string;
+  lightOpacity: number;
+  /** Desaturating veil for melancholy (0..~0.2). */
+  veil: number;
+  /** Faint noise texture for eerie scenes. */
+  grain: boolean;
+}
+
+/**
+ * Mood → a legible UI accent, for the scene spine ticks and the recap's mood
+ * journey. Brighter than the reading-surface wash (these are foreground marks).
+ */
+export const MOOD_COLOR: Record<Mood, string> = {
+  tense: '#5b74a8', tender: '#b06b80', ominous: '#6b4e9a', joyful: '#c79a4a',
+  melancholy: '#5a6a99', action: '#b5583e', eerie: '#4e8f6d', awe: '#3e97ab',
+  neutral: '#8a8a8a',
+};
+
+/** Moods whose scenes darken at the edges; others stay open. */
+const VIGNETTE_MOOD: Partial<Record<Mood, number>> = {
+  ominous: 0.5, eerie: 0.4, tense: 0.34, action: 0.26, melancholy: 0.16,
+};
+
+/** Sky tint per time of day — warm at the day's ends, cool at night. */
+const TIME_LIGHT: Record<TimeOfDay, { color: string; opacity: number }> = {
+  dawn: { color: '#ffb27a', opacity: 0.15 },
+  dusk: { color: '#ff8f57', opacity: 0.16 },
+  night: { color: '#2b3566', opacity: 0.22 },
+  day: { color: '', opacity: 0 },
+  unknown: { color: '', opacity: 0 },
+};
+
+export const sceneAtmosphere = (
+  mood: Mood, tension: number, timeOfDay?: TimeOfDay,
+): Atmosphere => {
+  const t = clamp(tension, 0, 1);
+  const vigBase = VIGNETTE_MOOD[mood] ?? 0;
+  const light = timeOfDay ? TIME_LIGHT[timeOfDay] : { color: '', opacity: 0 };
+  return {
+    mood,
+    washOpacity: mood === 'neutral' ? 0 : clamp(0.14 + t * 0.26, 0, 0.45),
+    vignette: vigBase ? clamp(vigBase * (0.55 + t * 0.7), 0, 0.62) : 0,
+    lightColor: light.color,
+    lightOpacity: light.opacity,
+    veil: mood === 'melancholy' ? 0.16 : 0,
+    grain: mood === 'eerie',
+  };
+};
 
 /* ---------------------------------------------------------------- */
 /* 5c — emotional TTS prosody                                        */

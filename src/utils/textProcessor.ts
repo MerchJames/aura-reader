@@ -11,6 +11,9 @@ export interface ProcessOptions {
   dialogueOwnLine?: boolean;
   smartTypography?: boolean;
   styleQuotes?: boolean;
+  /** Close dangling quotes / emphasis so misformatted prose renders cleanly.
+   *  Presentation-only; defaults on (pass false to skip, e.g. for speech). */
+  repairFormatting?: boolean;
   substituteNames?: boolean;
   characterName?: string;
   userName?: string;
@@ -113,6 +116,13 @@ export const processText = (text: string, opts: ProcessOptions = {}) => {
     processed = processed.replace(/^([ \t]*)\*([ \t]+)/gm, '$1\\*$2');
   }
 
+  // Close dangling quotes / emphasis so misformatted prose renders cleanly.
+  // Runs after paragraph structure is settled but before quotes get wrapped.
+  // Default on; speech/streaming callers pass false.
+  if (opts.repairFormatting !== false) {
+    processed = repairFormatting(processed);
+  }
+
   if (opts.styleQuotes) {
     // Wrap quoted speech in * * so it renders as <em> and can be styled as
     // dialogue. Skip spans that already contain markdown emphasis markers.
@@ -152,6 +162,63 @@ export const balanceEmphasis = (text: string): string => {
   const ticks = (out.match(/`/g) ?? []).length;
   if (ticks % 2 === 1) out += '`';
   return out;
+};
+
+/**
+ * Repair one paragraph's dangling markup: close an unterminated quote, and
+ * balance an italic/bold run that was left open (or closed) — the classic
+ * roleplay breakages where dialogue is cut off (`"the razor was a blade`) or an
+ * emphasis run got split across a blank line (markdown italics can't cross one).
+ * Balanced text is returned unchanged. Placement mirrors the SillyTavern
+ * "auto-balance" rule: a run opened at the paragraph start is closed at its end;
+ * a stray closer with no opener gets one prepended.
+ */
+const repairParagraph = (p: string): string => {
+  if (!p.trim()) return p;
+  let out = p;
+
+  // Unterminated straight double-quote → close it at the paragraph end.
+  if (((out.match(/"/g) ?? []).length) % 2 === 1) out = out.replace(/(\s*)$/, '"$1');
+  // Smart quotes: add as many closers as there are unmatched openers.
+  const opens = (out.match(/“/g) ?? []).length;
+  const closes = (out.match(/”/g) ?? []).length;
+  if (opens > closes) out = out.replace(/(\s*)$/, '”'.repeat(opens - closes) + '$1');
+
+  // Unbalanced bold → close it.
+  if (((out.match(/\*\*/g) ?? []).length) % 2 === 1) out = out.replace(/(\s*)$/, '**$1');
+  // Unbalanced single-asterisk italics → balance by where the run sits.
+  const singles = (out.replace(/\*\*/g, '').match(/\*/g) ?? []).length;
+  if (singles % 2 === 1) {
+    if (/^\s*\*(?!\*)/.test(out)) out = out.replace(/(\s*)$/, '*$1'); // opened, not closed
+    else out = out.replace(/^(\s*)/, '$1*');                          // closed, not opened
+  }
+  return out;
+};
+
+/**
+ * Presentation-only formatting repair for settled prose: fixes unterminated
+ * dialogue and split emphasis runs paragraph by paragraph, leaving the source
+ * untouched. Code spans/blocks are guarded so their contents are never
+ * rebalanced. (The streaming tail uses `balanceEmphasis` instead.)
+ */
+const CODE_GUARD_OPEN = '';
+const CODE_GUARD_CLOSE = '';
+const CODE_GUARD_RE = new RegExp(CODE_GUARD_OPEN + '(\\d+)' + CODE_GUARD_CLOSE, 'g');
+
+export const repairFormatting = (text: string): string => {
+  const stash: string[] = [];
+  const guard = (s: string) => `${CODE_GUARD_OPEN}${stash.push(s) - 1}${CODE_GUARD_CLOSE}`;
+  const guarded = text
+    .replace(/```[\s\S]*?```/g, guard)
+    .replace(/`[^`\n]*`/g, guard);
+
+  // Even indices are paragraphs; odd indices are the \n\n separators (kept as-is).
+  const repaired = guarded
+    .split(/(\n{2,})/)
+    .map((seg, i) => (i % 2 === 0 ? repairParagraph(seg) : seg))
+    .join('');
+
+  return repaired.replace(CODE_GUARD_RE, (_m, n) => stash[Number(n)]);
 };
 
 /**

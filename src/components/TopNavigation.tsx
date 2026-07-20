@@ -1,7 +1,7 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
-  ArrowLeft, BookMarked, BookOpen, Bot, Focus, GitBranch, Highlighter, List, MessageSquare,
-  Network, Pencil, Search, Settings, Table2, X,
+  ArrowLeft, BookMarked, BookOpen, Bot, Clapperboard, Film, Focus, GitBranch, Highlighter,
+  List, MessageSquare, Network, Pencil, Search, Settings, Table2, X,
 } from 'lucide-react';
 import { useAppStore } from '../store';
 import { useAuraV2Store, committedCount, flatMessages } from '../stores/useAuraV2Store';
@@ -13,6 +13,9 @@ import { buildSearchIndex, searchStory, SearchHit } from '../utils/storySearch';
 
 const VIEW_BUTTONS: { mode: ViewMode; icon: React.ReactNode; label: string }[] = [
   { mode: 'storybook', icon: <BookOpen size={18} />, label: 'Storybook' },
+  { mode: 'book', icon: <BookMarked size={18} />, label: 'Book' },
+  { mode: 'stage', icon: <Clapperboard size={18} />, label: 'Stage' },
+  { mode: 'vn', icon: <Film size={18} />, label: 'Visual Novel' },
   { mode: 'chat', icon: <MessageSquare size={18} />, label: 'Chat' },
   { mode: 'branches', icon: <GitBranch size={18} />, label: 'Branches' },
   { mode: 'overview', icon: <List size={18} />, label: 'Overview' },

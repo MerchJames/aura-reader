@@ -1,4 +1,4 @@
-import { Chain, ContextZone, Message } from '../types';
+import { Chain, ContextZone, Message, StoryTimeline } from '../types';
 
 /** A message paired with its 1-based flat reading index (the number shown in the builder). */
 export interface FlatEntry {
@@ -82,6 +82,7 @@ export interface ZoneBuild {
  */
 export const buildZoneBody = (
   zone: ContextZone, chains: Chain[], text: TextResolver,
+  timelines: StoryTimeline[] = [],
 ): ZoneBuild => {
   const flat = flatWithIndex(chains);
   const included = flat.filter(f => zone.messageIds.includes(f.msg.id));
@@ -107,7 +108,27 @@ export const buildZoneBody = (
     sections.push(`=== BRANCHLINES of message #${f.index} (${f.msg.name}, ${versions.length} versions) ===\n${vlines.join('\n\n')}`);
   });
 
-  const empty = included.length === 0 && branchEntries.length === 0;
+  // Attached branch timelines: whole tails, plus individually picked messages.
+  let timelineMsgCount = 0;
+  const wholeIds = new Set(zone.timelineIds ?? []);
+  const pickIds = new Set(zone.timelineMessageIds ?? []);
+  for (const tl of timelines) {
+    const whole = wholeIds.has(tl.id);
+    const picked = whole ? [] : tl.messages.filter(m => pickIds.has(m.id));
+    if (!whole && picked.length === 0) continue;
+    const msgs = whole ? tl.messages : picked;
+    timelineMsgCount += msgs.length;
+    const scope = whole
+      ? `entire divergent tail (${msgs.length} message${msgs.length === 1 ? '' : 's'})`
+      : `${msgs.length} selected message${msgs.length === 1 ? '' : 's'}`;
+    indexLines.push(`  [Branch "${tl.name}"] ${scope}; this branch diverges from the main story after message #${tl.forkIndex}`);
+    const bodyLines = msgs.map(m => `${m.name}: ${text(m)}`);
+    sections.push(
+      `=== BRANCH "${tl.name}" (an alternate timeline that diverges after message #${tl.forkIndex}) ===\n${bodyLines.join('\n\n')}`,
+    );
+  }
+
+  const empty = included.length === 0 && branchEntries.length === 0 && timelineMsgCount === 0;
   const header = [
     `--- CONTEXT ZONE: "${zone.name}" ---`,
     'A reader-curated selection of the story. Index of what follows:',
@@ -116,14 +137,16 @@ export const buildZoneBody = (
 
   return {
     body: empty ? '' : [header, '', ...sections].join('\n\n'),
-    messageCount: included.length,
+    messageCount: included.length + timelineMsgCount,
     branchlineCount: branchEntries.length,
     empty,
   };
 };
 
 /** One-line human summary of a zone for dropdowns/labels. */
-export const zoneSummary = (zone: ContextZone, chains: Chain[]): string => {
+export const zoneSummary = (
+  zone: ContextZone, chains: Chain[], timelines: StoryTimeline[] = [],
+): string => {
   const flat = flatWithIndex(chains);
   const idx = flat.filter(f => zone.messageIds.includes(f.msg.id)).map(f => f.index);
   const branch = flat
@@ -132,5 +155,12 @@ export const zoneSummary = (zone: ContextZone, chains: Chain[]): string => {
   const parts: string[] = [];
   if (idx.length) parts.push(`msg ${groupRanges(idx)}`);
   if (branch.length) parts.push(`branchlines ${groupRanges(branch)}`);
+  const wholeCount = (zone.timelineIds ?? []).filter(id => timelines.some(t => t.id === id)).length;
+  const pickIds = new Set(zone.timelineMessageIds ?? []);
+  const pickCount = timelines
+    .filter(t => !(zone.timelineIds ?? []).includes(t.id))
+    .reduce((n, t) => n + t.messages.filter(m => pickIds.has(m.id)).length, 0);
+  if (wholeCount) parts.push(`${wholeCount} branch${wholeCount === 1 ? '' : 'es'}`);
+  if (pickCount) parts.push(`${pickCount} branch msg${pickCount === 1 ? '' : 's'}`);
   return parts.join(' · ') || 'empty';
 };

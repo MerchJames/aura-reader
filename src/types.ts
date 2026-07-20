@@ -38,6 +38,23 @@ export interface Chain {
   starSettings?: ChainStarSettings;
 }
 
+/**
+ * An attached branch: a divergent tail forked off the trunk at `forkIndex`.
+ * SillyTavern exports each branch as its own chat file; on import, files
+ * sharing history are matched by content and stored like this —
+ * non-destructively, the trunk is never rewritten.
+ */
+export interface StoryTimeline {
+  id: string;
+  /** Human name, usually the branch file's name. */
+  name: string;
+  /** Number of trunk messages shared before the divergence. */
+  forkIndex: number;
+  /** The divergent tail (messages after the fork). */
+  messages: Message[];
+  addedAt: number;
+}
+
 export type StoryFormat = 'sillytavern' | 'kobold' | 'card' | 'document';
 
 export interface Highlight {
@@ -112,10 +129,16 @@ export interface Story extends StoryMeta {
   stars?: Record<string, ChainStarSettings>;
   /** Companion character-card data attached at import. */
   card?: CardInfo;
+  /** Attached branches (imported branch files), forked off the trunk. */
+  timelines?: StoryTimeline[];
+  /** Timeline currently being read; null/undefined = the trunk. */
+  activeTimeline?: string | null;
 }
 
 export type Screen = 'library' | 'reader';
-export type ViewMode = 'storybook' | 'chat' | 'overview' | 'highlights' | 'branches';
+export type ViewMode =
+  | 'storybook' | 'chat' | 'book' | 'stage' | 'vn'
+  | 'overview' | 'highlights' | 'branches';
 export type LayoutMode = 'continuous' | 'paginated';
 export type Theme =
   | 'light' | 'dark' | 'sepia' | 'notebook' | 'terminal'
@@ -123,10 +146,14 @@ export type Theme =
   | 'win98' | 'vista' | 'parchment' | 'synthwave' | 'amoled'
   | 'ocean' | 'forest' | 'sakura' | 'comic' | 'newspaper'
   | 'grimoire' | 'cyberpunk' | 'eink' | 'gameboy' | 'starlight' | 'manga'
-  | 'noir' | 'cozy' | 'aurora';
+  | 'noir' | 'cozy' | 'aurora' | 'rpg' | 'pixelchat' | 'pixelrpg' | 'snek';
 export type FontFamily =
+  /** Follow the theme's signature font (terminal→mono, book→serif, ...). */
+  | 'theme'
   | 'sans' | 'serif' | 'mono' | 'handwriting' | 'typewriter' | 'dyslexic'
-  | 'rounded' | 'slab' | 'medieval' | 'comic';
+  | 'rounded' | 'slab' | 'medieval' | 'comic'
+  /** A user-uploaded font, keyed by its id (see useFontStore). */
+  | `custom:${string}`;
 /** Accent override; '' means use the theme's own accent. */
 export type AccentColor =
   | '' | 'blue' | 'violet' | 'rose' | 'emerald' | 'amber'
@@ -201,6 +228,10 @@ export interface ContextZone {
   messageIds: string[];
   /** Messages whose ALL alternate versions (swipes) are included. */
   branchlineIds: string[];
+  /** Attached branch timelines included WHOLE (their divergent tail). */
+  timelineIds?: string[];
+  /** Individual messages picked out of branch timeline tails. */
+  timelineMessageIds?: string[];
   createdAt: number;
   updatedAt: number;
 }
@@ -359,6 +390,8 @@ export interface SceneDescriptor {
   /** Dominant speaker + their emotion, for expressive TTS. */
   speaker?: { name: string; emotion: string };
   emphasis?: SceneEmphasis[];
+  /** Particle weather the prose clearly shows (fog, snowfall, floating ash…). */
+  fx?: 'smoke' | 'fog' | 'stars' | 'sparkles' | 'rain' | 'embers' | 'snow' | 'petals';
   createdAt: number;
 }
 
@@ -466,6 +499,12 @@ export interface AppConfig {
   sceneSoundscapes: boolean;
   /** Shape TTS rate/pitch by the passage's emotion + tension. */
   emotionalTts: boolean;
+  /** Style individual whisper/shout words the Director flagged (off by default —
+   *  it reads as scattered italics/bold, so it's opt-in). */
+  sceneEmphasis: boolean;
+  /** When the Director rereads a page, also ask the AI to fix passages with
+   *  broken quote/emphasis markup (lands as an undoable Lens override). */
+  aiRepairFormatting: boolean;
   hideMetadata: boolean;
   /** Show images embedded in messages / attached to them. */
   showImages: boolean;
@@ -509,6 +548,8 @@ export interface AppConfig {
   kokoroUserVoice: string;
   /** Per-character Kokoro voice, keyed by the speaker's display name. */
   ttsVoiceByCharacter: Record<string, string>;
+  /** Auto-assign distinct voices to unmapped side characters (dialogue casts itself). */
+  autoCastVoices: boolean;
 
   /** Loop a quiet ambient bed while reading. */
   ambientEnabled: boolean;
@@ -532,6 +573,8 @@ export interface AppConfig {
   phoneDialogueOnly: boolean;
   /** Ambient theme effects (scanlines, particles, glows, animations). */
   themeEffects: boolean;
+  /** Animate a living particle background suited to the theme (opt-in). */
+  livingBackground: boolean;
 
   /** AI assistant (OpenAI-compatible endpoint). */
   aiBaseUrl: string;
@@ -588,7 +631,14 @@ export interface AppState extends AppConfig {
   // Library actions
   initLibrary: () => Promise<void>;
   /** Import stories, optionally with companion character cards to auto-map. */
-  importFiles: (files: File[], cardFiles?: File[]) => Promise<{ imported: number; errors: string[] }>;
+  importFiles: (files: File[], cardFiles?: File[]) =>
+    Promise<{ imported: number; errors: string[]; notes: string[] }>;
+  /** Read a different timeline of the open story (null = the trunk). */
+  setActiveTimeline: (timelineId: string | null) => void;
+  /** Detach an attached branch from the open story (non-destructive to trunk). */
+  removeTimeline: (timelineId: string) => void;
+  /** Copy a timeline out into its own standalone library story. */
+  snipTimelineToStory: (timelineId: string) => Promise<void>;
   openStory: (id: string) => Promise<void>;
   closeStory: () => void;
   deleteStoryById: (id: string) => Promise<void>;
@@ -636,6 +686,8 @@ export interface AppState extends AppConfig {
   setSceneTheming: (on: boolean) => void;
   setSceneSoundscapes: (on: boolean) => void;
   setEmotionalTts: (on: boolean) => void;
+  setSceneEmphasis: (on: boolean) => void;
+  setAiRepairFormatting: (on: boolean) => void;
   setHideMetadata: (hide: boolean) => void;
   setAutoStream: (autoStream: boolean) => void;
   setAutoFormat: (autoFormat: boolean) => void;
@@ -661,6 +713,7 @@ export interface AppState extends AppConfig {
   setKokoroUserVoice: (kokoroUserVoice: string) => void;
   /** Assign (or clear, with '') a Kokoro voice for a named speaker. */
   setCharacterVoice: (name: string, voice: string) => void;
+  setAutoCastVoices: (autoCastVoices: boolean) => void;
   setAmbientEnabled: (ambientEnabled: boolean) => void;
   setAmbientVolume: (ambientVolume: number) => void;
   /** Set (or clear, with '') the ambient bed for a theme id. */
@@ -682,6 +735,7 @@ export interface AppState extends AppConfig {
   setOocHandling: (mode: OocHandling) => void;
   setPhoneDialogueOnly: (on: boolean) => void;
   setThemeEffects: (on: boolean) => void;
+  setLivingBackground: (on: boolean) => void;
   /** Set a profile picture (data URL) for the character or the user, per story. */
   setStoryAvatar: (who: 'character' | 'user', dataUrl: string | undefined) => void;
   /** Set a profile picture for a specific character by name (group chats). */

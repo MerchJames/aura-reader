@@ -9,6 +9,9 @@ import { paintHighlights } from '../utils/highlightPaint';
 import { resolveContent } from '../utils/lens';
 import { useEntityHighlighter } from './EntityTooltip';
 import { useSceneDirector } from '../hooks/useSceneDirector';
+import { useScenes } from '../hooks/useScenes';
+import { SceneAtmosphere } from './SceneAtmosphere';
+import { SceneSpine } from './SceneSpine';
 import { motion, AnimatePresence } from 'motion/react';
 import { MessageBlock } from './MessageBlock';
 import { SelectionPopover } from './SelectionPopover';
@@ -40,14 +43,13 @@ export const ReaderDisplay = () => {
   // Hybrid Scene Director: auto-reads the current page while enabled.
   useSceneDirector();
 
-  // Adaptive theming — the Director's read of the passage currently in focus
-  // tints the reading surface (mood → colour, tension → strength). The active
-  // passage is the streaming line, else the last one shown.
-  const activeSceneId = store.streamingMessage?.id
-    ?? store.visibleMessages[store.visibleMessages.length - 1]?.id;
-  const scene = store.sceneTheming && store.themeEffects && storyId && activeSceneId
-    ? v2.sceneByStory[storyId]?.[activeSceneId]
-    : undefined;
+  // Adaptive theming — the reading surface is dressed for the SCENE the reader
+  // is in (a contiguous mood span), not the single passage in focus, so the
+  // atmosphere holds across the scene and only eases at its boundary. Tension
+  // within the scene rides the arc. Works with no AI (heuristic scenes); the
+  // Director only refines it. See SceneAtmosphere for the layers.
+  const { scenes, active: scene, activeId: activeSceneId } = useScenes();
+  const atmosphereOn = store.sceneTheming && store.themeEffects;
   const bottomRef = useRef<HTMLDivElement>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
   // The currently-streaming message element — the focus target that the
@@ -386,7 +388,7 @@ export const ReaderDisplay = () => {
         streamEffect={store.streamEffect}
         expressiveText={store.expressiveText}
         ttsReading={store.ttsEnabled && store.ttsPending && isStreamingMsg}
-        emphasis={storyId ? v2.sceneByStory[storyId]?.[msg.id]?.emphasis : undefined}
+        emphasis={store.sceneEmphasis && storyId ? v2.sceneByStory[storyId]?.[msg.id]?.emphasis : undefined}
         isStreamingMsg={isStreamingMsg}
         isMsgZoomed={isMsgZoomed}
         avatar={avatar}
@@ -433,14 +435,11 @@ export const ReaderDisplay = () => {
 
   return (
     <>
-    {scene && scene.mood !== 'neutral' && (
-      <div
-        className="scene-wash"
-        data-mood={scene.mood}
-        style={{ opacity: 0.15 + Math.max(0, Math.min(1, scene.tension)) * 0.25 }}
-        aria-hidden
-      />
+    <SceneAtmosphere scene={scene} activeId={activeSceneId} enabled={atmosphereOn} />
+    {store.sceneTheming && !store.isAutofocusMode && (
+      <SceneSpine scenes={scenes} activeSceneId={scene?.id} />
     )}
+
     <div
       ref={scrollRef}
       onScroll={handleScroll}

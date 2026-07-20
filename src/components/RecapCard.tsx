@@ -8,6 +8,9 @@ import {
 import { chatCompletion, listModels } from '../utils/aiClient';
 import { cardToPromptBlock } from '../utils/cardContext';
 import { plainTextForSpeech } from '../utils/textProcessor';
+import { segmentScenes } from '../utils/sceneSegment';
+import { MOOD_COLOR } from '../utils/sceneMood';
+import { Mood } from '../types';
 
 const RECAP_SYSTEM =
   'Write a warm, spoiler-free "previously on…" recap of the story excerpt, in 3-4 sentences. '
@@ -33,6 +36,7 @@ export const RecapCard = () => {
   // "where you left off", not the live cursor.
   const [snapshot, setSnapshot] = useState<{
     storyId: string; readCount: number; lastRead: string; minutesLeft: number;
+    arc: { mood: Mood; label: string }[];
   } | null>(null);
 
   useEffect(() => {
@@ -51,11 +55,22 @@ export const RecapCard = () => {
     const remainingWords = messages.slice(readCount)
       .reduce((n, m) => n + m.content.split(/\s+/).length, 0);
     const wps = wordsPerSecond(s.playbackSpeed);
+
+    // The mood journey through what's been read — the last few scenes, so the
+    // reader re-enters with a feel for the arc, not just the last line.
+    const descriptors = useAuraV2Store.getState().sceneByStory[story.id];
+    const readInputs = messages.slice(0, readCount)
+      .map(m => ({ id: m.id, role: m.role, content: m.content, startsChain: m.startsChain }));
+    const arc = segmentScenes(readInputs, descriptors)
+      .slice(-4)
+      .map(sc => ({ mood: sc.mood, label: sc.location ?? sc.mood }));
+
     setSnapshot({
       storyId: story.id,
       readCount,
       lastRead: plainTextForSpeech(lastMsg?.content ?? '').slice(0, 260),
       minutesLeft: Math.round(remainingWords / (wps * 60)),
+      arc: arc.length >= 2 ? arc : [],
     });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [story?.id, screen]);
@@ -152,6 +167,29 @@ export const RecapCard = () => {
               Where you left off
             </p>
             <p className="italic">“{snapshot.lastRead}…”</p>
+          </div>
+        )}
+
+        {snapshot.arc.length >= 2 && (
+          <div>
+            <p className="text-[10px] font-bold uppercase tracking-wider text-muted mb-1.5">
+              The story so far
+            </p>
+            <div className="flex items-center gap-1.5 flex-wrap text-xs">
+              {snapshot.arc.map((sc, i) => (
+                <React.Fragment key={i}>
+                  {i > 0 && <span className="text-muted/50" aria-hidden>→</span>}
+                  <span className="inline-flex items-center gap-1.5 capitalize">
+                    <span
+                      className="w-2 h-2 rounded-full shrink-0"
+                      style={{ background: MOOD_COLOR[sc.mood] }}
+                      aria-hidden
+                    />
+                    {sc.label}
+                  </span>
+                </React.Fragment>
+              ))}
+            </div>
           </div>
         )}
 

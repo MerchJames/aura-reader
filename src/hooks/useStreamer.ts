@@ -68,6 +68,7 @@ export const useStreamer = () => {
       if (cachedFullText === null || key !== cachedKey) {
         cachedFullText = processText(content, {
           hideMetadata: s.hideMetadata,
+          repairFormatting: false,
           oocHandling: s.oocHandling,
           autoFormat: s.autoFormat,
           autoFormatRules: s.autoFormatRules,
@@ -88,6 +89,11 @@ export const useStreamer = () => {
     const scheduleAdvance = () => {
       const s = useAppStore.getState();
       s.finishCurrentMessage();
+      // Short lines finish streaming in a blink and would vanish before
+      // they can be read (worst on Stage/VN where only the current passage
+      // shows) — hold them for a read-speed floor before advancing.
+      const words = (useAppStore.getState().streamedText.match(/\S+/g) ?? []).length;
+      const readFloor = words <= 30 ? Math.min(2400, 300 + words * 110) : 0;
       pauseTimer = setTimeout(() => {
         const st = useAppStore.getState();
         if (!st.isStreaming || st.streamingMessage?.id !== messageId) return;
@@ -97,7 +103,7 @@ export const useStreamer = () => {
           return;
         }
         st.advanceMessage();
-      }, Math.max(0, s.messagePause));
+      }, Math.max(0, s.messagePause, readFloor));
     };
 
     const tick = (now: number) => {

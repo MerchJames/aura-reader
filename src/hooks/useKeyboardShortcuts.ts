@@ -55,10 +55,13 @@ export const useKeyboardShortcuts = () => {
           break;
 
         case 'arrowright':
+          // The book view turns its own pages on arrows.
+          if (s.viewMode === 'book') break;
           if (s.layoutMode === 'paginated' && s.screen === 'reader') s.nextPage();
           break;
 
         case 'arrowleft':
+          if (s.viewMode === 'book') break;
           if (s.layoutMode === 'paginated' && s.screen === 'reader') s.prevPage();
           break;
 

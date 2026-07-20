@@ -9,6 +9,10 @@
     "preview": "vite preview",
     "clean": "rm -rf dist",
     "lint": "tsc --noEmit",
+    "e2e:libs": "bash scripts/stage-browser-libs.sh || true",
+    "test:e2e": "npm run e2e:libs && npm run build && playwright test",
+    "test:e2e:ui": "npm run e2e:libs && playwright test --ui",
+    "test:e2e:report": "playwright show-report",
     "tauri": "tauri",
     "app:dev": "tauri dev",
     "app:build": "tauri build"
@@ -33,6 +37,7 @@
     "zustand": "^5.0.14"
   },
   "devDependencies": {
+    "@playwright/test": "^1.61.1",
     "@tailwindcss/vite": "^4.1.14",
     "@tauri-apps/cli": "^2",
     "@types/node": "^22.14.0",

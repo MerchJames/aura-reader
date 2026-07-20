@@ -332,6 +332,55 @@ export const THEMES: Record<Theme, ThemeDef> = {
       bubbleAi: '#0a1526', bubbleUser: 'rgba(78, 230, 184, 0.18)', bubbleUserText: '#e7fff6',
     },
   },
+  rpg: {
+    id: 'rpg', label: 'RPG Quest', isDark: true,
+    font: 'rounded',
+    maxWidth: 'max-w-3xl',
+    rootClass: 'theme-rpg',
+    animation: 'typewriter',
+    vars: {
+      bg: '#0d1030', surface: '#151a45', text: '#eef1ff', muted: '#8d93c8',
+      accent: '#ffd23f', border: '#3d478f',
+      bubbleAi: 'rgba(10, 13, 40, 0.92)', bubbleUser: 'rgba(61, 71, 143, 0.55)',
+      bubbleUserText: '#eef1ff',
+    },
+  },
+  pixelchat: {
+    id: 'pixelchat', label: 'Pixel Chat', isDark: true,
+    font: 'mono',
+    maxWidth: 'max-w-md',
+    rootClass: 'theme-pixelchat',
+    animation: 'typewriter',
+    vars: {
+      bg: '#101830', surface: '#1a2547', text: '#d9f3ee', muted: '#7fa8b8',
+      accent: '#4de3c1', border: '#3a5a8c',
+      bubbleAi: '#152242', bubbleUser: '#1c4a44', bubbleUserText: '#d9f3ee',
+    },
+  },
+  pixelrpg: {
+    id: 'pixelrpg', label: 'Pixel RPG', isDark: true,
+    font: 'mono',
+    maxWidth: 'max-w-3xl',
+    rootClass: 'theme-pixelrpg',
+    animation: 'typewriter',
+    vars: {
+      bg: '#060a26', surface: '#101b6b', text: '#f4f6ff', muted: '#96a2d8',
+      accent: '#ffe9a8', border: '#c8d4f8',
+      bubbleAi: '#1a2a8c', bubbleUser: '#233293', bubbleUserText: '#f4f6ff',
+    },
+  },
+  snek: {
+    id: 'snek', label: 'Snek Comms', isDark: true,
+    font: 'mono',
+    maxWidth: 'max-w-2xl',
+    rootClass: 'theme-snek theme-crt',
+    animation: 'typewriter',
+    vars: {
+      bg: '#020604', surface: '#06110b', text: '#9fd8a8', muted: '#5a8a63',
+      accent: '#c4f0c9', border: '#2e5c38',
+      bubbleAi: '#04100a', bubbleUser: '#0a1f12', bubbleUserText: '#c4f0c9',
+    },
+  },
   custom: {
     id: 'custom', label: 'Custom', isDark: true, // isDark recomputed from bg luminance
     vars: {
